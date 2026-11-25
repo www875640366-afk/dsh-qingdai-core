@@ -73,7 +73,7 @@ await t('生活会话写进 qingdai 库（0.9 也不自动 pin）', async () => 
   const r = await call(memWrite, { text: '对方的生日是 3 月 21 日，杭州人', importance: 0.9 }, QINGDAI)
   assert.ok(r.ok, JSON.stringify(r))
   assert.strictEqual(r.pinned, 0, '永不遗忘只能由人点头，模型自己钉不住')
-  const db = new DatabaseSync(join(TMP, 'qingdai', 'qingdai.db'))
+  const db = new DatabaseSync(join(TMP, 'life', 'life.db'))
   const row = db.prepare('SELECT text, importance, pinned FROM memories').get()
   db.close()
   assert.ok(row?.text.includes('生日'))
@@ -87,7 +87,7 @@ await t('工作会话写进 work 库，不串库', async () => {
   const row = w.prepare('SELECT text FROM memories').get()
   w.close()
   assert.ok(row?.text.includes('compaction-basic'))
-  const q = new DatabaseSync(join(TMP, 'qingdai', 'qingdai.db'))
+  const q = new DatabaseSync(join(TMP, 'life', 'life.db'))
   const leak = q.prepare(`SELECT 1 FROM memories WHERE text LIKE '%compaction%'`).get()
   q.close()
   assert.ok(!leak, '生活库串进了工作记忆！')
@@ -125,7 +125,7 @@ await t('session/event 触发留底', async () => {
       try { await fn(SESSION, ev) } catch { /* 忽略 */ }
     }
   }
-  const db = new DatabaseSync(join(TMP, 'qingdai', 'qingdai.db'))
+  const db = new DatabaseSync(join(TMP, 'life', 'life.db'))
   const rows = db.prepare('SELECT role, text, seq FROM events ORDER BY id').all()
   db.close()
   assert.ok(rows.length >= 2, `留底条数 ${rows.length}`)

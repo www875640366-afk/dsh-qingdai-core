@@ -1,6 +1,7 @@
 // db.js —— 双库建库建表（node:sqlite 内置，零外部依赖）。
 //
-// 两个物理库：life.db（私人生活）/ work.db（工作会话）。
+// 两个物理库：life/life.db（白名单会话）/ work/work.db（其余会话）。
+// 注意：磁盘叫 life，但内部 side 值仍是 qingdai（路径映射见 routing.js 的 DB_DIRS/DB_NAMES）。
 // 路由在 routing.js，这里只管「给一个路径，开出一张结构正确的库」。
 //
 // 【为什么不用全局单连接】v2 的老规矩：谁要库，谁 openDb(path)。

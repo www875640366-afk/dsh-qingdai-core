@@ -55,13 +55,17 @@ DSH（DeepSeek Harness）插件，把四件跟「长期关系」有关的事装�
 
 ```
 $DSH_HOME/storages/qingdai-core/
-  life/life.db     生活会话（白名单）
-  work/work.db     工作会话（其余全部）
-  routing.json     白名单快照
-  wake-state.json  主动开口状态
-  core.md          人格核心
+  life/life.db    生活会话（白名单）
+  work/work.db    工作会话（其余全部）
+  routing.json   白名单快照
+  wake-state.json 主动开口状态
+  core.md         人格核心
   core-history.json
 ```
+
+> **命名说明**：磁盘上生活库叫 `life/life.db`（更通用）；但内部 side 值、API 参数
+> `side=qingdai`、面板选项卡仍沿用历史名 `qingdai`。两者由 `routing.js` 的
+> `DB_DIRS` / `DB_NAMES` 一处映射，改路径只需动那里。
 
 路由规则只有一条：**会话在 `wakeSessions` 白名单里 → 生活库，否则 → 工作库**。
 白名单同时是主动开口的白名单，一份名单两处用，避免两份清单漂移。
@@ -472,8 +476,8 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
 
 ```
 $DSH_HOME/storages/qingdai-core/
-  life/life.db          生活库
-  work/work.db          工作库
+  life/life.db          生活库（白名单会话）
+  work/work.db          工作库（其余全部）
   routing.json          白名单快照（引擎跨 realm 读）
   wake-state.json       开口状态（今天几次、上次开口）
   fishworld-cursor.txt  鱼的世界问到哪了

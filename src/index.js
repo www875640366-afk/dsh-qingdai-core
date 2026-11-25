@@ -24,7 +24,7 @@
 import { mkdirSync, writeFileSync, renameSync, appendFileSync, existsSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { openDb } from './db.js'
-import { dbPlanFor, sidFrom } from './routing.js'
+import { dbPlanFor, sidFrom, DB_NAMES, DB_DIRS } from './routing.js'
 import { TOOLS as MEM_TOOLS, buildTools as buildMemTools } from './tools.js'
 import { runMemWrite, runMemSearch, runRawMemory, paramsToSchema } from './tools.js'
 import { flushPending, loadVectors, embedTexts, cosine, rerank as rerankApi, signatureOf } from './vector.js'
@@ -538,7 +538,7 @@ export function createApp(ctx, config = {}) {
     setTimeout(() => {
       for (const side of ['qingdai', 'work']) {
         try {
-          const db = openDb(join(dataDir, side, side === 'qingdai' ? 'qingdai.db' : 'work.db'))
+          const db = openDb(sideDbPath(dataDir, side))
           const r = sweep(db)
           if (r.forgotten || r.purged) log(`生命周期 ${side}：曲线淘汰 ${r.forgotten} / 台账到期清 ${r.purged}`)
         } catch { /* 单库失败不影响别库 */ }
@@ -941,7 +941,7 @@ export function createApp(ctx, config = {}) {
         const out = {}
         for (const side of ['qingdai', 'work']) {
           try {
-            const db = openDb(join(dataDir, side, side === 'qingdai' ? 'qingdai.db' : 'work.db'))
+            const db = openDb(sideDbPath(dataDir, side))
             out[side] = db.prepare('SELECT COUNT(*) AS n FROM memories WHERE superseded = 0').get().n
             // v4 起没有 cold 那一档了（一条线，过线就直接进最近删除）
             out[side + 'Cold'] = 0
@@ -974,9 +974,16 @@ export function createApp(ctx, config = {}) {
  * 「这一段」= 该会话最近一条主人消息的时间点 → 现在。
  */
 /** 一侧（生活/工作）的库文件路径。面板和统计共用这一处，别再各写一遍三元表达式。 */
+/**
+ * 一侧（生活/工作）的库文件路径。面板和统计共用这一处，别再各写一遍三元表达式。
+ *
+ * 【磁盘名 vs 内部标识】磁盘上生活库叫 life/life.db（更通用，开源出去别人也好懂），
+ * 但内部 side 值、API 参数、面板选项卡仍用 'qingdai'（历史兼容，改它牵连太广且没收益）。
+ * 这里就是两者的唯一映射点。
+ */
 function sideDbPath(dataDir, side) {
   const s = side === 'work' ? 'work' : 'qingdai'
-  return join(dataDir, s, s === 'qingdai' ? 'qingdai.db' : 'work.db')
+  return join(dataDir, DB_DIRS[s], DB_NAMES[s])
 }
 
 /** sources 里存的是 JSON；解析失败就当没有（老数据是 seq 数组，显示不出来也不该报错）。 */

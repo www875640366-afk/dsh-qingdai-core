@@ -13,7 +13,10 @@
 
 import { join } from 'node:path'
 
-export const DB_NAMES = Object.freeze({ qingdai: 'qingdai.db', work: 'work.db' })
+// 磁盘名 vs 内部标识：side 值仍是 'qingdai'（API/面板兼容），
+// 但磁盘上生活库叫 life/life.db（更通用）。这里是路径映射的唯一来源。
+export const DB_NAMES = Object.freeze({ qingdai: 'life.db', work: 'work.db' })
+export const DB_DIRS = Object.freeze({ qingdai: 'life', work: 'work' })
 
 /**
  * 这个会话是不是白名单会话。
@@ -38,7 +41,7 @@ export function dbPlanFor(sid, dataDir, sessions = []) {
   const id = String(sid ?? '').trim()
   if (!id) return { ok: false, reason: '拿不到会话 id，拒绝写入（不猜库）' }
   const side = isQingdaiSession(id, sessions) ? 'qingdai' : 'work'
-  return { ok: true, db: join(dataDir, side, DB_NAMES[side]), side }
+  return { ok: true, db: join(dataDir, DB_DIRS[side], DB_NAMES[side]), side }
 }
 
 /**
