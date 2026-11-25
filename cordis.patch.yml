@@ -1,0 +1,12 @@
+# dsh-qingdai-core —— DSH bundle patch
+# name 必须与安装后的包名一致（dsh-qingdai-core）。
+#
+# 只插主插件一行。压缩不接管：
+#   官方 compaction-basic 照常压；压缩结束时我们监听 compaction/end，
+#   从自己的留底表（events）提炼记忆节点——原文更全，也不碰官方引擎。
+#   （静态 patch 改不了已有条目的 name：DSH 会判 name mismatch 静默跳过，
+#     所以「换引擎」那条路本来也走不通，不用试。）
+
+- insert:
+    - id: dsh-qingdai-core
+      name: dsh-qingdai-core

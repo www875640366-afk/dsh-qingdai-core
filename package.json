@@ -1,0 +1,50 @@
+{
+  "name": "dsh-qingdai-core",
+  "version": "0.1.0",
+  "description": "DSH 插件：主动开口 + 双库记忆（生活/工作物理隔离）+ 人格核心 + 压缩联动。记忆存在本地 SQLite，装好即自动建库。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "long-term-memory",
+    "sqlite",
+    "proactive",
+    "persona"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots",
+        "locale"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
