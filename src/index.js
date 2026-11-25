@@ -696,8 +696,11 @@ export function createApp(ctx, config = {}) {
             ...r,
             alive: canJudge ? live.has(String(r.sid)) : null,
           }))
-          const orphan = canJudge ? orphanSessions(db, live) : []
-          return { ok: true, rows, canJudge, orphanCount: orphan.length, orphan }
+          const orphan = canJudge ? orphanSessions(db, live) : { ok: true, rows: [], count: 0, bytes: 0 }
+          // orphanSessions 返回的是对象 {ok, rows, bytes, count}，不是数组。
+          // 以前写成 orphan.length —— 永远 undefined，面板上「清孤儿会话」显示 0 个且按钮置灰。
+          const orphanCount = Array.isArray(orphan?.rows) ? orphan.rows.length : 0
+          return { ok: true, rows, canJudge, orphanCount, orphan }
         },
         /** 丢掉某些会话的留底原文。 */
         purgeRaw(side, sids) {
