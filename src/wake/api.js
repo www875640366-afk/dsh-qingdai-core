@@ -113,6 +113,9 @@ function handle(req, res, connection, deps = {}) {
           wakeLog: Array.isArray(state.wakeLog) ? state.wakeLog.slice(0, 10) : [],
         },
         config: {
+          // 称呼：面板原文页的角色标签用它显示（默认「主人/我」，开源版中性）
+          ownerName: cfg.ownerName ?? '主人',
+          selfName: cfg.selfName ?? '我',
           wakeSessions: cfg.wakeSessions ?? [],
           quietStart: cfg.quietStart,
           quietEnd: cfg.quietEnd,
@@ -295,7 +298,10 @@ function handle(req, res, connection, deps = {}) {
         offset: Number(url.searchParams.get('offset')) || 0,
       }
       const r = deps.mem?.raw?.(side, opts)
-      return send(200, { ok: Boolean(r?.ok), side, ...(r ?? {}) })
+      // 称呼：面板原文页用它显示角色标签（默认中性，开源友好）
+      const cfg = deps.getCfg?.() ?? {}
+      return send(200, { ok: Boolean(r?.ok), side,
+        ownerName: cfg.ownerName ?? '主人', selfName: cfg.selfName ?? '我', ...(r ?? {}) })
     }
 
     if (path === '/api/raw/months' && method === 'GET') {
