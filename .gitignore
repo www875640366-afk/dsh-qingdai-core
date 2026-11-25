@@ -1,0 +1,46 @@
+# 依赖（本插件零运行依赖，但保险）
+node_modules/
+
+# ---- 数据：绝不进仓库 ----
+# 默认数据目录是 $DSH_HOME/storages/qingdai-core，配置里也能指到别处；
+# 这里把常见位置都盖住，避免有人把插件目录装在工作区里一把提交上去。
+storages/
+**/qingdai-core/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 状态与台账
+wake-state.json
+routing.json
+core.md
+core-sections.json
+core-history.json
+core-backup/
+fishworld-cursor.txt
+extract.log
+core.log
+core.log.old
+
+# 表情包清单随各人自己的目录走，不进仓库
+表情清单.json
+
+# 可选的「工作区文件夹」约定（见 README 第九节）：私人记事区，绝不进仓库
+工作记忆/
+private/
+我的小屋/
+
+# 临时与测试残留
+tmp/
+*.tmp
+*.bak
+*.bak-*
+test/tmp-selftest/
+test/tmp-smoke/
+
+# 系统杂物
+.DS_Store
+Thumbs.db
+desktop.ini
