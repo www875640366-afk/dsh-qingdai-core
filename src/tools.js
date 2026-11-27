@@ -146,7 +146,8 @@ export function buildTools({ ownerName = '主人', selfName = '我' } = {}) {
       '怎么写：',
       '- 主语明确：谁、什么事。换了会话也要看得懂（别写「那个漏洞修了」）',
       '- 相对时间换成具体日期；定不了就保留原来的精度，别编',
-      '- 情况变了，写清新状态和变化原因，旧条用 supersedes:[旧 id] 作废',
+      '- 情况变了，写清新状态和变化原因，旧条用 supersedes:[旧 id] 提交替代',
+      '  —— 这不会立刻作废旧条：新内容进待办，由主人裁决。同意=新条入库、旧条进最近删除；拒绝=什么都不写。',
       '- 别在回复里说「我记下了」——记就是记了，不用报',
       '',
       'importance 三档（只决定掉多快，不决定「永不遗忘」）：',
@@ -164,7 +165,7 @@ export function buildTools({ ownerName = '主人', selfName = '我' } = {}) {
     params: {
       text: { type: 'string', description: '记忆内容，一句话说清。别写长文（上限 2000 字）', required: true },
       importance: { type: 'number', description: '重要度 0.9 / 0.6（默认）/ 0.3。只影响衰减快慢' },
-      supersedes: { type: 'array', items: { type: 'number' }, description: '要作废的旧记忆 id（情况变了时用）。旧的标 superseded，不是删' },
+      supersedes: { type: 'array', items: { type: 'number' }, description: '要替代的旧记忆 id（情况变了时用）。不立即生效：新内容进待办由主人裁决，同意才入库并把旧条移进最近删除' },
       force: { type: 'boolean', description: '确认不是重复 / 疑似密钥已问过主人，带 true 强写' },
       from: { type: 'string', enum: ['user', 'self', 'env'], description: '这条怎么来的：user=他亲口说的（默认）、self=你自己归纳的、env=从环境/文件里看到的' },
       requestPin: { type: 'boolean', description: '请求把这条钉住（永不遗忘）。会进待办由主人裁决，不是立刻生效' },
@@ -184,11 +185,20 @@ export function buildTools({ ownerName = '主人', selfName = '我' } = {}) {
           lines.push(r.hasSuggestion ? '已把我的建议一起放进待办，等主人裁决。' : '待办里还没建议——下次被拦时带 suggest 一并给出。')
           return lines.join('\n')
         }
+        // 改了口（带 supersedes）：新内容进了待办，等主人裁决，不是失败
+        if (r.pending) {
+          const lines = [r.reason ?? '已进待办，等主人裁决。']
+          for (const h of r.existing ?? []) {
+            lines.push(`  旧条 #${h.id} ${h.text}`)
+          }
+          lines.push(r.hasSuggestion ? '已把我的建议一起放进待办。' : '待办里还没建议——下次被拦时带 suggest 一并给出。')
+          return lines.join('\n')
+        }
         if (r.needsConfirm) return `先问${OWNER}：${r.reason}`
         return `没写进去：${r.reason ?? '不知道哪儿不对'}`
       }
       const tier = r.importance >= 0.9 ? '核心档' : r.importance >= 0.6 ? '重要' : '普通'
-      const gone = r.superseded?.length ? ` · 已作废 #${r.superseded.join(' #')}` : ''
+      const gone = r.superseded?.length ? ` · 已提交替代 #${r.superseded.join(' #')}，等主人裁决` : ''
       const ask = r.pinRequest ? ' · 已请求钉住，等主人点头' : ''
       // 不写「记住了」这类可以原话复述的字眼——模型容易跟着在回复里说「我记下了」
       return `#${r.id} 已写入（${tier}）${gone}${ask}`
