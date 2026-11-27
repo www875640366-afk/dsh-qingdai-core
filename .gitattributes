@@ -1,0 +1,11 @@
+# 统一换行：仓库内一律存 LF，工作区在 Windows 上检出为 CRLF。
+# 没有这条时，改一个文件会让整个文件的换行符全变，diff 全是噪音。
+* text=auto eol=lf
+
+# 二进制，不做换行转换
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.png binary
+*.jpg binary
+*.ico binary
