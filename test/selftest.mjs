@@ -71,7 +71,7 @@ console.log('== heat.js ==')
 const DAY = 86_400_000
 await t('半衰期随重要度和被想起次数变长，次数封顶', () => {
   const base = halfLifeOf({ importance: 0.3, accessCount: 0 })
-  assert.ok(Math.abs(base - CURVE.halfLifeBase * (1 + CURVE.kImportance * 0.3)) < 1e-9, `普通档 ${base}`)
+  assert.ok(Math.abs(base - CURVE.halfLifeBase * (1 + CURVE.kImportance * 0.3)) < 1e-9, `重要度 0.3 的半衰期 ${base}`)
   const heavy = halfLifeOf({ importance: 0.9, accessCount: 0 })
   assert.ok(heavy > base, `重要度高的要更长：${heavy} vs ${base}`)
   const used = halfLifeOf({ importance: 0.3, accessCount: CURVE.accessCap })
@@ -101,8 +101,8 @@ await t('五档全在一条线上：按剩余天数切', () => {
   })
   assert.strictEqual(tierOf({ pinned: 1 }, now), 'core', '钉住的永远是核心')
   // 重要度只决定掉多快，不直接决定档位——档位看的是「还剩几天」
-  assert.strictEqual(tierOf(at(0), now), 'normal', '普通档刚写落正常（约 116 天）')
-  assert.strictEqual(tierOf(at(0, { imp: 0.9 }), now), 'important', '核心档刚写落重要（约 202 天）')
+  assert.strictEqual(tierOf(at(0), now), 'normal', '刚写的落在正常档')
+  assert.strictEqual(tierOf(at(0, { imp: 0.9 }), now), 'important', '刚写的落在重要档')
   assert.strictEqual(tierOf(at(45), now), 'normal', '45 天落正常')
   assert.strictEqual(tierOf(at(90), now), 'fading', '90 天落快忘了')
   assert.strictEqual(tierOf(at(400), now), 'gone', '过线是被遗忘')
@@ -255,9 +255,9 @@ await t('graveyard 恢复：捡回来只回 50%，不满血', () => {
   const now = Date.now()
   const keep = keepOf({ importance: back.importance, accessCount: back.accessCount, lastTouchedAt: back.lastTouchedAt }, now)
   assert.ok(Math.abs(keep - 0.5) < 0.01, `捡回来该是 50% 留存率，实际 ${(keep * 100).toFixed(1)}%`)
-  // 50% 换成天数：普通档 96 天半衰期 → 约 49 天。不至于当场又没，也不给满命续。
+  // 50% 换成天数：重要度 0.3 是 96 天半衰期 → 约 49 天。不至于当场又没，也不给满命续。
   const left = daysLeftOf({ importance: back.importance, accessCount: 0, lastTouchedAt: back.lastTouchedAt }, now)
-  assert.ok(left > 40 && left < 55, `普通档捡回来该剩约 49 天，实际 ${left.toFixed(0)} 天`)
+  assert.ok(left > 40 && left < 55, `捡回来该剩约 49 天，实际 ${left.toFixed(0)} 天`)
 })
 await t('supersedes：不立即改库，先进待办；同意后才替代', () => {
   db.exec('DELETE FROM memories')

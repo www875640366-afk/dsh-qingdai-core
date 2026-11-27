@@ -93,7 +93,7 @@ export function tierOf(item, now = Date.now(), cfg = CURVE) {
   return 'fading'
 }
 
-/** 核心档的显示留存率：钉住那一刻冻住的，不随时间掉。缺值就补一个当前值。 */
+/** 钉住那条的显示留存率：钉住那一刻冻住的，不随时间掉。缺值就补一个当前值。 */
 export function frozenKeepOf(item, now = Date.now(), cfg = CURVE) {
   const f = Number(item?.frozenKeep)
   if (Number.isFinite(f) && f > 0) return Math.min(1, f)

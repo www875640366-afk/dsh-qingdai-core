@@ -218,7 +218,7 @@ export function memWrite(db, args = {}, { now = Date.now(), anchor = null } = {}
   }
 
   const importance = clampImportance(args.importance)
-  // 一律不自动钉。核心档是人工裁决的结果——模型只能提请求，进待办等人点头。
+  // 一律不自动钉。钉住是人工裁决的结果——模型只能提请求，进待办等人点头。
   // 按重要度自动钉住等于把「永不遗忘」交给模型打分。
   const pinned = 0
   const pinReason = args.requestPin === true
@@ -399,8 +399,8 @@ export function markUsed(db, ids, { now = Date.now(), via = 'search' } = {}) {
  * 不该拿一份完整寿命。满血的话，删了捡、捡了删可以无限续命，台账就白设了。
  *
  * 50% 折算成时间就是「距上次想起 ln2 个半衰期」：
- *   普通档 96 天半衰期 → 捡回来还剩 49 天
- *   0.9 档 168 天半衰期 → 捡回来还剩 86 天
+ *   重要度 0.3：96 天半衰期 → 捡回来还剩 49 天
+ *   重要度 0.9：168 天半衰期 → 捡回来还剩 86 天
  */
 /**
  * 从台账恢复一条。
