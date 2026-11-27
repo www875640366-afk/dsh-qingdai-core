@@ -88,7 +88,8 @@ $DSH_HOME/storages/qingdai-core/
 
 插件做三件模型做不了的事：
 
-1. **写前查重** —— 实体重叠或字面 Dice ≥ 0.55 就拦下，把已有的列出来，让模型决定重写还是 `supersedes`
+1. **写前查重** —— 实体重叠或字面 Dice ≥ 0.6 就拦下，进「处理」页由人裁决：
+   同意 = 新条入库、旧条进最近删除；拒绝 = 什么都不写
 2. **出处机械填** —— `sources` 存 `{sid, fromTs, toTs}`，会话和时间戳由插件算；
    模型上下文里没有这些信息，它填的一定是编的
 3. **密钥嗅探** —— 明确的密钥直接拒，疑似的要 `force:true` 再来
@@ -102,7 +103,7 @@ $DSH_HOME/storages/qingdai-core/
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `halfLifeBase` | 60 天 | 中性记忆闲置这么久剩 37% |
+| `halfLifeBase` | 60 天 | 中性记忆（重要度 0.3）半衰期 = 60×(1+2×0.3) = 96 天，闲置 60 天剩 53% |
 | `kImportance` | 2.0 | 重要度对半衰期的拉伸 |
 | `kAccess` | 1.5 | 被想起次数对半衰期的拉伸 |
 | `accessCap` | 10 | 次数封顶，防「提多了就永不忘」 |
@@ -162,7 +163,7 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
 
 ### 检索本身
 
-- **有精排**：粗排取候选（`minSem 0.5` 只是噪音底），reranker 给相关性，
+- **有精排**：粗排取候选（`minSem` 放宽到 0.5，0.58 只是噪音底），reranker 给相关性，
   融合分 = `0.55 × 精排 + 0.45 × 粗排`
 - **没精排**（没配 key / 请求失败）：退回纯关键词，结果里标「降级」
 - **向量补算**：写路径**不碰云端 API**。`mem_write` 只落词条并标 `vectorPending`，
@@ -238,6 +239,9 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
 1. 主动开口时先去问一句「外面有没有人找她」（需要配置 key；没配就整段跳过）
 2. 把 `world_*` 加进工作会话的禁用清单
 
+key 从环境变量读，默认 `FISH_WORLD_KEY`（可用 `keyEnv` 改名字）；查看用的 key 默认
+`FISH_WORLD_VIEW_KEY`（用 `viewKeyEnv` 改）。也可以直接配 `fishWorldKey` / `fishWorldBaseUrl` 走 HTTP。
+
 **要让工作会话也屏蔽这些工具**：在插件面板的「设置 → 工具面」里勾选对应工具，
 或直接在 `cordis.patch.yml` 里写：
 
@@ -275,19 +279,20 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
    如果有没来得及记下的事，现在用 `mem_write` 补一条」
 
 **为什么不自动提炼**：自动提炼和「模型自己写」天然打架，同一件事写两遍措辞不同就是两条。
-把「记不记」交还给模型。批量提炼的函数保留着，但**没有调用点**，要手动补再自己接。
+把「记不记」交还给模型。补记靠模型自己在对话里调 `mem_write`。
 
 ---
 
 ## 八、注册的模型工具
 
-五个工具，多一个都不加。治理类操作（体检 / 扫描 / 钉住审批 / 提升）全在面板按钮上，不进模型工具面。
+五个工具，多一个都不加。治理类操作（体检 / 扫描 / 提升 / 删除 / 捡回）全在面板按钮上，不进模型工具面。
+需要人点头才能做的事（钉住、替代、密钥审批）统一进面板的「处理」页，不走模型工具面。
 
 ### 记忆三件（所有会话可用）
 
 | 工具 | 干什么 | 关键参数 |
 |---|---|---|
-| **`mem_write`** | 写一条记忆节点 | `text`（必填）、`importance`（0.9/0.6/0.3，只影响掉多快）、`supersedes`（作废旧条）、`from`（user/self/env）、`requestPin` + `pinReason`（请求钉住）、`suggest` + `suggestReason`（随待办一起给出处理建议）、`force`（强写） |
+| **`mem_write`** | 写一条记忆节点 | `text`（必填）、`importance`（0.9/0.6/0.3，只影响掉多快）、`supersedes`（替代旧条，进待办等人裁决）、`from`（user/self/env）、`requestPin` + `pinReason`（请求钉住）、`suggest` + `suggestReason`（随待办一起给出处理建议）、`force`（强写） |
 | **`mem_search`** | 查记忆节点 | `query`（必填，自然说法）、`limit`（默认 6） |
 | **`raw_memory`** | 查原文留底 | `fromSeq` / `toSeq` / `keyword` / `limit`（默认 20） |
 
@@ -427,6 +432,7 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
     recallLimit: 3
     recallMaxChars: 800
     recallMinRel: 0.62
+    recallMinScore: 0.62    # 没有精排时的兜底分
 
     # 原文保留：工作库按天清，生活库不动
     workRawKeepDays: 180
@@ -438,7 +444,24 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
     fishWorld: false
     fishWorldKey: ''
     fishWorldBaseUrl: ''
+    keyEnv: FISH_WORLD_KEY         # 从哪个环境变量读 key
+    viewKeyEnv: FISH_WORLD_VIEW_KEY # 从哪个环境变量读查看用的 key
 ```
+
+### 压缩引擎的五个字段
+
+这五个不在本插件的 `config:` 下，而在 profile 里叫 `compaction-basic` 的那个条目下——
+本插件不接管官方压缩引擎，只在面板的「设置 → 压缩设置」里读写它们：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `thresholdRatio` | 0.8 | 触发压缩的上下文占用比 |
+| `retainRatio` | 0.2 | 压缩后保留的比例 |
+| `headroomTokens` | 65536 | 给下一轮预留的 token |
+| `summarizationProvider` | 空 | 摘要用的 provider |
+| `summarizationModel` | 空 | 摘要用的模型 |
+
+只放行这五个：压缩配错了会丢上下文，别的一律不让本插件改。
 
 ---
 

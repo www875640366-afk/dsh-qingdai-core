@@ -34,7 +34,7 @@ export async function runMemSearch(deps, args = {}) {
     const rs = await rerank(String(args.query ?? ''), base.hits.map((h) => h.text))
     if (Array.isArray(rs) && rs.length) {
       const rel = new Map(rs.map((x) => [Number(x.index), Number(x.score) || 0]))
-      const minRel = 0.02   // 旧插件口径：reranker 原始分的纯噪音硬底
+      const minRel = 0.02   // reranker 原始分的纯噪音硬底
       const fused = base.hits
         .map((h, i) => ({ ...h, rel: rel.has(i) ? rel.get(i) : 0 }))
         .filter((h) => h.rel >= minRel)
