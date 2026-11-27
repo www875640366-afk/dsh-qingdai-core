@@ -1,4 +1,4 @@
-// secrets.js —— 密钥嗅探（思想抄 plastic-memory，精简到 30 行）。
+// secrets.js —— 密钥嗅探。
 //
 // 写入 mem_write 前过一遍：
 //   · 明确的密钥（sk-、AKIA、Bearer 头、私钥块）→ 一律拒存

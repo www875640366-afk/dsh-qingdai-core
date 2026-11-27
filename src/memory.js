@@ -3,7 +3,7 @@
 // 写：sniffSecret → 重要度分档（0.9 自动 pin）→ 落库。向量不在写路径上
 //     （异步补算挂在外层），402 失败不丢词条。
 // 查：词面覆盖 + 余弦相似 + 时间/重要度加权 → 精排可选 → 命中即 touchHeat。
-//     embed 挂了自动降级纯关键词（memory-tiers 实测可用），留底表永远兜底。
+//     embed 挂了自动降级纯关键词，留底表永远兜底。
 
 import { sniffSecret } from './secrets.js'
 import { touch, keepOf, halfLifeOf, sweepLifecycle, CURVE } from './heat.js'
@@ -12,7 +12,7 @@ import { withTransaction } from './db.js'
 
 /** 检索参数：每库一张表覆盖默认值（生活放宽、工作收紧）。 */
 export const SEARCH_DEFAULTS = Object.freeze({
-  limit: 6,             // 输出上限（memory-tiers semanticExtra 跑过的值）
+  limit: 6,             // 输出上限
   minSem: 0.58,         // 语义闸：bge-m3 实测相关 ≥0.62 / 无关 ≤0.52，取中间偏保守
   minCoverage: 0.3,     // 词面闸（无向量时唯一闸）：关键词命中三成以上
   minScore: 0.55,       // 综合分兜底闸
@@ -41,6 +41,117 @@ function normalizeFrom(v) {
   return 'unknown'
 }
 
+/**
+ * 开一条待办账本条目。所有待办（冲突 / 钉住 / 疑似密钥待写）都走这里。
+ * 同 kind + 同文本的未决条目只留一条，免得模型重试几次就刷屏。
+ */
+export function openDecision(db, { kind, payload, at = Date.now() }) {
+  const text = String(payload?.text ?? '')
+  try {
+    const dup = db.prepare(
+      "SELECT id FROM decisions WHERE state = 'open' AND kind = ? AND json_extract(payload, '$.text') = ?",
+    ).get(kind, text)
+    if (dup) return Number(dup.id)
+  } catch { /* json_extract 不可用时跳过查重 */ }
+  const r = db.prepare(
+    "INSERT INTO decisions (kind, payload, state, at) VALUES (?, ?, 'open', ?)",
+  ).run(kind, JSON.stringify(payload ?? {}), at)
+  return Number(r.lastInsertRowid)
+}
+
+/** 待办账本清单（未决的）。 */
+export function openDecisions(db, { limit = 50 } = {}) {
+  try {
+    return db.prepare(
+      "SELECT id, kind, payload, suggestion, at FROM decisions WHERE state = 'open' ORDER BY at DESC LIMIT ?",
+    ).all(Math.max(1, Math.min(200, Number(limit) || 50))).map((r) => {
+      let payload = {}
+      let suggestion
+      try { payload = JSON.parse(String(r.payload)) } catch { payload = {} }
+      try { suggestion = r.suggestion ? JSON.parse(String(r.suggestion)) : undefined } catch { suggestion = undefined }
+      return { id: Number(r.id), kind: String(r.kind), payload, suggestion, at: Number(r.at) || 0 }
+    })
+  } catch {
+    return []
+  }
+}
+
+/** 给一条待办写建议（字段级，不另开表）。 */
+export function setDecisionSuggestion(db, id, suggestion) {
+  const row = db.prepare('SELECT id, state FROM decisions WHERE id = ?').get(Number(id))
+  if (!row) return { ok: false, reason: '没有这条待办' }
+  if (row.state !== 'open') return { ok: false, reason: '这条已经处理过了' }
+  db.prepare('UPDATE decisions SET suggestion = ? WHERE id = ?').run(
+    suggestion === null || suggestion === undefined ? null : JSON.stringify(suggestion), Number(row.id),
+  )
+  return { ok: true, id: Number(row.id) }
+}
+
+/**
+ * 裁决一条待办：agree 按申请办，reject 就不办。
+ *   conflict：agree = 写新内容并作废旧的；reject = 不写
+ *   pin：agree = 钉住；reject = 不钉（记忆照常衰减）
+ *   write：agree = 写库；reject = 丢弃
+ */
+export function resolveDecision(db, { id, action, now = Date.now() } = {}) {
+  let row
+  try {
+    row = db.prepare('SELECT id, kind, payload, state FROM decisions WHERE id = ?').get(Number(id))
+  } catch { return { ok: false, reason: '库还没迁到这一版' } }
+  if (!row) return { ok: false, reason: '没有这条待办' }
+  if (row.state !== 'open') return { ok: false, reason: '这条已经处理过了' }
+
+  const agree = action === 'agree'
+  if (action !== 'agree' && action !== 'reject') return { ok: false, reason: '不认识的处理方式' }
+  let payload = {}
+  try { payload = JSON.parse(String(row.payload)) } catch { payload = {} }
+  const kind = String(row.kind)
+
+  if (!agree) {
+    db.prepare("UPDATE decisions SET state = 'dropped', settledAt = ? WHERE id = ?").run(now, Number(row.id))
+    return { ok: true, id: Number(row.id), action, kind }
+  }
+
+  if (kind === 'pin') {
+    const memId = Number(payload.memoryId)
+    db.prepare('UPDATE memories SET pinned = 1, frozenKeep = COALESCE(frozenKeep, 1) WHERE id = ?').run(memId)
+    db.prepare("UPDATE decisions SET state = 'resolved', settledAt = ? WHERE id = ?").run(now, Number(row.id))
+    return { ok: true, id: Number(row.id), action, kind, memoryId: memId }
+  }
+
+  // conflict / write 都是「把 payload 里的新内容写进库」
+  const wrote = memWrite(db, {
+    text: String(payload.text ?? ''),
+    importance: payload.importance,
+    force: true,
+  }, { now, anchor: payload.anchor ?? null })
+  if (!wrote.ok) return { ok: false, reason: wrote.reason }
+
+  // conflict：同意就用新的替掉旧的——旧的搬进「最近删除」，14 天内还能捡回来。
+  // 【为什么不是标 superseded】标了之后它既不在活跃列表、也不在最近删除，等于凭空消失；
+  //   主人点「采纳」的预期是「旧的那条收走了、还能反悔」，那就该进台账。
+  if (kind === 'conflict' && payload.againstId != null) {
+    forgetMemory(db, Number(payload.againstId), { now, reason: '被新写的那条替代' })
+  }
+  db.prepare("UPDATE decisions SET state = 'resolved', settledAt = ? WHERE id = ?").run(now, Number(row.id))
+  return { ok: true, id: Number(row.id), action, kind, memoryId: wrote.id, superseded: payload.againstId }
+}
+
+/**
+ * 模型在同一个 mem_write 调用里带上的处理建议。
+ * 待办开出来之后立刻挂上去——不用主人再单独跑一条命令让我们「补上建议」。
+ */
+function attachSuggestion(db, decisionId, args) {
+  const pick = String(args?.suggest ?? '').trim()
+  if (pick !== 'agree' && pick !== 'reject') return false
+  const reason = String(args?.suggestReason ?? '').trim().slice(0, 400)
+  try {
+    db.prepare('UPDATE decisions SET suggestion = ? WHERE id = ?')
+      .run(JSON.stringify({ action: pick === 'agree' ? 'keep-a' : 'keep-b', recommend: pick, reason, ops: [] }), Number(decisionId))
+    return true
+  } catch { return false }
+}
+
 export function memWrite(db, args = {}, { now = Date.now(), anchor = null } = {}) {
   const text = String(args.text ?? '').trim()
   if (!text) return { ok: false, reason: 'text 不能为空' }
@@ -49,64 +160,92 @@ export function memWrite(db, args = {}, { now = Date.now(), anchor = null } = {}
   const secret = sniffSecret(text)
   if (secret.verdict === 'hard') return { ok: false, reason: '内容含明确的密钥，拒绝写入' }
   if (secret.verdict === 'soft' && args.force !== true) {
-    return { ok: false, needsConfirm: true, reason: '疑似密钥：请先问主人，同意后带 force:true 重发' }
+    // 疑似密钥不落库，进账本等主人点头——同意才写，拒绝就丢弃。
+    const decisionId = openDecision(db, {
+      kind: 'write',
+      at: now,
+      payload: {
+        text, importance: clampImportance(args.importance), from: normalizeFrom(args.from), anchor,
+        reason: '疑似含密钥（长随机串 + 密钥类字样）',
+      },
+    })
+    return { ok: false, needsConfirm: true, decisionId, reason: '疑似含密钥：已进待办，等主人同意后才写入记忆库。' }
   }
 
-  // 查重：撞了就返回已有的，让调用方决定（force 强制写 / supersedes 替代旧的）
+  // 改了口（带 supersedes）：不落库，进账本等裁决。
+  // 【为什么不立即生效】先压旧的再让人「确认」等于事后追认；待办该是决定之前的事。
+  const supIds = normalizeIds(args.supersedes)
+  if (args.force !== true && supIds.length) {
+    const old = db.prepare('SELECT id, text FROM memories WHERE id = ? AND superseded = 0').get(supIds[0])
+    if (old) {
+      const decisionId = openDecision(db, {
+        kind: 'conflict', at: now,
+        payload: {
+          text, importance: clampImportance(args.importance), from: normalizeFrom(args.from), anchor,
+          againstId: Number(old.id), againstText: String(old.text ?? ''),
+          why: 'supersedes',
+          summary: '改了口：这条要替代 #' + old.id,
+        },
+      })
+      const hasSuggestion = attachSuggestion(db, decisionId, args)
+      return {
+        ok: false, pending: true, decisionId, hasSuggestion,
+        existing: [{ id: Number(old.id), text: String(old.text ?? ''), score: 1 }],
+        reason: '改了口：已进待办，等主人裁决（同意=用新的替掉旧的，拒绝=不写）。',
+      }
+    }
+  }
+
+  // 查重：撞了就进账本等裁决
   if (args.force !== true) {
     const dups = findDuplicates(db, text)
     if (dups.length) {
       const reason = `已经记过了（${dups[0].by === 'entity' ? '同名实体' : `字面相似 ${dups[0].score.toFixed(2)}`}）。`
         + '同一件事不用重写；情况变了要更新，就带 supersedes:[旧 id] 写新的一条。'
-      // 拦下来这件事本身要留痕：模型自己 force 重发就绕过去了，人得知道它被拦过。
-      const pendingId = recordConflict(db, {
-        text, importance: clampImportance(args.importance), against: dups[0], reason, at: now,
+      const decisionId = openDecision(db, {
+        kind: 'conflict', at: now,
+        payload: {
+          text, importance: clampImportance(args.importance), from: normalizeFrom(args.from), anchor,
+          againstId: dups[0].id == null ? null : Number(dups[0].id),
+          againstText: String(dups[0].text ?? ''),
+          why: 'duplicate',
+          summary: '跟库里已有的撞上了',
+        },
       })
-      return {
-        ok: false,
-        duplicate: true,
-        existing: dups,
-        pendingId,
-        reason,
-      }
+      const hasSuggestion = attachSuggestion(db, decisionId, args)
+      return { ok: false, duplicate: true, existing: dups, decisionId, hasSuggestion, reason }
     }
   }
 
   const importance = clampImportance(args.importance)
   // 一律不自动钉。核心档是人工裁决的结果——模型只能提请求，进待办等人点头。
-  // （旧版是 importance >= 0.9 直接 pinned，等于把「永不遗忘」交给模型打分。）
+  // 按重要度自动钉住等于把「永不遗忘」交给模型打分。
   const pinned = 0
-  const pinRequest = args.requestPin === true
+  const pinReason = args.requestPin === true
     ? String(args.pinReason ?? '模型请求钉住这条').trim().slice(0, 200) || '模型请求钉住这条'
     : null
   // 来源类型：你亲口说的 / 我自己归纳的 / 环境里看到的。模型不传就当是你说过的。
   const from = normalizeFrom(args.from)
   const sources = anchor ? JSON.stringify({ ...anchor, from }) : JSON.stringify({ from })
 
-  const superseded = []
   const info = withTransaction(db, () => {
-    // 先写新的，拿到 id，才能让被替代的旧条记得「被谁替了」（面板做新旧对照要用）。
-    const res = db.prepare(
-      `INSERT INTO memories (text, importance, pinned, pinRequest, pinRequestAt,
-                             heat, repeatStrength, createdAt, lastMentionedAt, lastTouchedAt, sources)
-       VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)`,
-    ).run(text, importance, pinned, pinRequest, pinRequest ? now : null, now, now, now, sources)
-    const newId = Number(res.lastInsertRowid)
-    for (const raw of normalizeIds(args.supersedes)) {
-      const old = db.prepare('SELECT id FROM memories WHERE id = ? AND superseded = 0').get(raw)
-      if (!old) continue
-      db.prepare('UPDATE memories SET superseded = 1, supersededBy = ? WHERE id = ?').run(newId, raw)
-      superseded.push(raw)
-    }
-    return res
+    return db.prepare(
+      `INSERT INTO memories (text, importance, pinned, heat, repeatStrength,
+                             createdAt, lastMentionedAt, lastTouchedAt, sources)
+       VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?)`,
+    ).run(text, importance, pinned, now, now, now, sources)
   })
+  const newId = Number(info.lastInsertRowid)
+  // 请求钉住：记忆本身已经写下（它有效，只是「永不遗忘」要审批），账本里开一条等点头的条目
+  if (pinReason !== null) {
+    openDecision(db, { kind: 'pin', at: now, payload: { memoryId: newId, reason: pinReason } })
+  }
   return {
     ok: true,
-    id: Number(info.lastInsertRowid),
+    id: newId,
     importance,
     pinned,
-    pinRequest: Boolean(pinRequest),
-    superseded,
+    pinRequest: pinReason !== null,
     vectorPending: true,
   }
 }
@@ -123,7 +262,7 @@ export function memSearch(db, args = {}, { now = Date.now(), vectors = null, cos
   const query = String(args.query ?? '').trim()
   if (!query) return { ok: false, reason: 'query 不能为空' }
   // 调用方传的条数优先：注入要 3 条、工具要 limit*2 给精排当候选。
-  // 以前这里只认 cfg.limit（默认 6），所以面板和注入调的条数全是空的。
+  // 条数上限必须来自配置，只认默认值会让面板和注入拿不到实际条数。
   const limit = Math.max(1, Math.min(50, Number(args.limit) || Number(cfg.limit) || 6))
 
   const pool = db.prepare(
@@ -330,97 +469,17 @@ function restoreFromGraveyardInner(db, graveyardId, { now, at }) {
  * 记一条待审冲突。同一条新文本撞同一条旧记忆只留一条待审，免得模型重试几次就刷屏。
  * 表不存在（老库还没迁）时静默放过——记录冲突失败不能让正常写入也失败。
  */
-function recordConflict(db, { text, importance, against, reason, at }) {
-  try {
-    const againstId = against?.id == null ? null : Number(against.id)
-    const dup = db.prepare(
-      "SELECT id FROM conflicts WHERE state = 'open' AND againstId IS ? AND text = ?",
-    ).get(againstId, text)
-    if (dup) return Number(dup.id)
-    const r = db.prepare(
-      `INSERT INTO conflicts (text, importance, againstId, against, reason, at, state)
-       VALUES (?, ?, ?, ?, ?, ?, 'open')`,
-    ).run(text, Number.isFinite(Number(importance)) ? Number(importance) : 0.6, againstId, String(against?.text ?? ''), reason, at)
-    return Number(r.lastInsertRowid)
-  } catch {
-    return null
-  }
-}
-
-/** 待审清单（state='open' 的）。 */
-export function openConflicts(db, { limit = 50 } = {}) {
-  try {
-    return db.prepare(
-      `SELECT c.id, c.text, c.importance, c.againstId, c.against, c.reason, c.at,
-              m.id AS liveId, m.text AS liveText, m.superseded AS liveSuperseded
-       FROM conflicts c
-       LEFT JOIN memories m ON m.id = c.againstId
-       WHERE c.state = 'open'
-       ORDER BY c.at DESC LIMIT ?`,
-    ).all(Math.max(1, Math.min(200, Number(limit) || 50))).map((r) => ({
-      id: Number(r.id),
-      text: String(r.text ?? ''),
-      importance: Number(r.importance) || 0.6,
-      againstId: r.againstId == null ? null : Number(r.againstId),
-      // 旧条还在就取实时的，不在了（被替代/删了）退回快照
-      againstText: r.liveText != null && !Number(r.liveSuperseded) ? String(r.liveText) : String(r.against ?? ''),
-      againstGone: r.liveId == null || Boolean(Number(r.liveSuperseded)),
-      reason: String(r.reason ?? ''),
-      at: Number(r.at) || 0,
-    }))
-  } catch {
-    return []
-  }
-}
-
 /**
- * 处理一条待审冲突。
- *   replace 用这条替代旧的那条（旧的进「已被替代」，面板还能撤销）
- *   keep    两条都留（旧的不动，新的照写）
- *   drop    算了，不写
- *
- * 走 force 写：这条本来就是被查重拦下来的，再查一遍还是会被拦。
+ * 记一条「疑似密钥、等主人点头才写」的待写内容。
+ * 同一条文本只留一条待审，免得模型重试几次就刷屏。
  */
-export function resolveConflict(db, { id, action, now = Date.now() } = {}) {
-  let row
-  try {
-    row = db.prepare('SELECT id, text, importance, againstId, state FROM conflicts WHERE id = ?').get(Number(id))
-  } catch { return { ok: false, reason: '库还没迁到这一版' } }
-  if (!row) return { ok: false, reason: '没有这条待审' }
-  if (row.state !== 'open') return { ok: false, reason: '这条已经处理过了' }
-
-  if (action === 'drop') {
-    db.prepare("UPDATE conflicts SET state = 'dropped' WHERE id = ?").run(Number(row.id))
-    return { ok: true, dropped: true }
-  }
-  if (action !== 'replace' && action !== 'keep') return { ok: false, reason: '不认识的处理方式' }
-
-  const supersedes = action === 'replace' && row.againstId != null ? [Number(row.againstId)] : []
-  const wrote = memWrite(db, {
-    text: row.text,
-    importance: Number(row.importance) || 0.6,
-    force: true,
-    supersedes,
-  }, { now })
-  if (!wrote.ok) return { ok: false, reason: wrote.reason }
-
-  // 同一条旧记忆可能被撞过好几次：余下没处理的待审一并结掉，不然它们会一直挂在面板上
-  if (row.againstId != null) {
-    db.prepare(
-      "UPDATE conflicts SET state = 'resolved' WHERE state = 'open' AND againstId = ?",
-    ).run(Number(row.againstId))
-  }
-  db.prepare("UPDATE conflicts SET state = 'resolved' WHERE id = ?").run(Number(row.id))
-  return { ok: true, id: wrote.id, superseded: wrote.superseded, action }
-}
-
 /**
  * 手动删一条：搬进台账（软删，随时能捡回来），连向量一起清掉。
  * 不是物理删除——陪伴场景删记忆是雷区，台账就是兜底。
  */
-export function forgetMemory(db, id, { now = Date.now(), reason = '\u624b\u52a8\u5220\u9664' } = {}) {
+export function forgetMemory(db, id, { now = Date.now(), reason = '手动删除' } = {}) {
   const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(Number(id))
-  if (!row) return { ok: false, reason: '\u5e93\u91cc\u6ca1\u6709\u8fd9\u6761' }
+  if (!row) return { ok: false, reason: '库里没有这条' }
   // 整行存一份：撤销要原样放回去，不能把分数和新鲜度打回默认值
   const snapshot = JSON.stringify(row)
   return withTransaction(db, () => {
@@ -433,7 +492,6 @@ export function forgetMemory(db, id, { now = Date.now(), reason = '\u624b\u52a8\
   })
 }
 
-/** 面板撤销替代：把一条被替代的记忆放回活跃池，并把替代它的那条重新压下去。 */
 export function unsupersede(db, id) {
   const row = db.prepare('SELECT id, superseded, supersededBy FROM memories WHERE id = ?').get(Number(id))
   if (!row) return { ok: false, reason: '库里没有这条' }

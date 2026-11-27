@@ -83,11 +83,10 @@ function handle(req, res, connection, deps = {}) {
     || path === '/api/restore'
     || path === '/api/unreplace'
     || path === '/api/forget'
-    || path === '/api/conflicts/resolve'
     || path === '/api/raw/purge'
-    || path === '/api/pin/approve'
-    || path === '/api/pin/reject'
     || path === '/api/unpin'
+    || path === '/api/decision/resolve'
+    || path === '/api/decision/suggestion'
     || path === '/api/wake'
   )
   if (method !== 'GET' && !writable) return send(405, { ok: false, error: '只读', path, method })
@@ -187,7 +186,7 @@ function handle(req, res, connection, deps = {}) {
     }
 
     if (path === '/api/memories') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       const q = url.searchParams.get('q') || ''
       const limit = Number(url.searchParams.get('limit')) || 100
       const offset = Number(url.searchParams.get('offset')) || 0
@@ -201,7 +200,7 @@ function handle(req, res, connection, deps = {}) {
     }
 
     if (path === '/api/graveyard') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       try {
         const rows = deps.mem?.graveyard?.(side, { limit: Number(url.searchParams.get('limit')) || 100 }) ?? []
         return send(200, { ok: true, side, rows })
@@ -209,7 +208,7 @@ function handle(req, res, connection, deps = {}) {
     }
 
     if (path === '/api/checkup') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       try {
         const r = deps.mem?.checkup?.(side) ?? { rows: [], summary: {} }
         return send(200, { ok: true, side, ...r })
@@ -218,28 +217,34 @@ function handle(req, res, connection, deps = {}) {
 
 
     if (path === '/api/pending') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       try {
         const r = deps.mem?.pending?.(side, { limit: Number(url.searchParams.get('limit')) || 50 }) ?? { replaced: [], forgotten: [] }
         return send(200, { ok: true, side, ...r })
       } catch (e) { return send(500, { ok: false, error: String(e?.message ?? e) }) }
     }
 
-    if (path === '/api/conflicts/resolve' && method === 'POST') {
+    // 裁决一条待办（账本条目）：agree 按申请办 / reject 不办
+    if (path === '/api/decision/resolve' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
-        const action = String(body?.action ?? '')
-        if (!['replace', 'keep', 'drop'].includes(action)) {
-          return send(400, { ok: false, error: 'action 只能是 replace / keep / drop' })
-        }
-        const r = deps.mem?.resolveConflict?.(side, { id: body?.id, action })
+        const side = body?.side === 'work' ? 'work' : 'life'
+        const r = deps.mem?.resolveDecision?.(side, { id: body?.id, action: body?.action })
+        return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
+      }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
+    }
+
+    // 给一条待办写建议（存账本条目的字段上）
+    if (path === '/api/decision/suggestion' && method === 'POST') {
+      return bodyOf().then((body) => {
+        const side = body?.side === 'work' ? 'work' : 'life'
+        const r = deps.mem?.setDecisionSuggestion?.(side, body?.id, body?.suggestion)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
     }
 
     if (path === '/api/forget' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
+        const side = body?.side === 'work' ? 'work' : 'life'
         const r = deps.mem?.forget?.(side, body?.id)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
@@ -247,7 +252,7 @@ function handle(req, res, connection, deps = {}) {
 
     if (path === '/api/unreplace' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
+        const side = body?.side === 'work' ? 'work' : 'life'
         const r = deps.mem?.unsupersede?.(side, body?.id)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
@@ -255,7 +260,7 @@ function handle(req, res, connection, deps = {}) {
 
     if (path === '/api/restore' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
+        const side = body?.side === 'work' ? 'work' : 'life'
         const r = deps.mem?.restore?.(side, body?.id)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
@@ -267,7 +272,7 @@ function handle(req, res, connection, deps = {}) {
         // 只算当前会话所属那个库：生活会话不该看到工作库的注入
         const sid = url.searchParams.get('sid') || ''
         const wake = deps.getCfg?.()?.wakeSessions ?? []
-        const side = sid && wake.includes(sid) ? 'qingdai' : 'work'
+        const side = sid && wake.includes(sid) ? 'life' : 'work'
         const b = deps.mem?.lastInjectBatch?.(side)
         return send(200, { ok: true, side, at: b?.at ?? 0, count: b?.n ?? 0 })
       } catch (e) {
@@ -277,7 +282,7 @@ function handle(req, res, connection, deps = {}) {
 
     // ---- 最近注入：她这阵子自动带进上下文的记忆 ----
     if (path === '/api/recent-inject' && method === 'GET') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       const limit = Number(url.searchParams.get('limit')) || 10
       try {
         return send(200, { ok: true, side, rows: deps.mem?.recentInjected?.(side, limit) ?? [] })
@@ -288,7 +293,7 @@ function handle(req, res, connection, deps = {}) {
 
     // ---- 原文库 ----
     if (path === '/api/raw' && method === 'GET') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       const opts = {
         q: String(url.searchParams.get('q') ?? '').slice(0, 100),
         sid: String(url.searchParams.get('sid') ?? '').slice(0, 100),
@@ -305,43 +310,27 @@ function handle(req, res, connection, deps = {}) {
     }
 
     if (path === '/api/raw/months' && method === 'GET') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       return send(200, { ok: true, side, months: deps.mem?.rawMonths?.(side) ?? [] })
     }
 
     if (path === '/api/raw/sessions' && method === 'GET') {
-      const side = url.searchParams.get('side') === 'work' ? 'work' : 'qingdai'
+      const side = url.searchParams.get('side') === 'work' ? 'work' : 'life'
       return send(200, { side, ...(deps.mem?.rawSessions?.(side) ?? { ok: false }) })
     }
 
     if (path === '/api/raw/purge' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
+        const side = body?.side === 'work' ? 'work' : 'life'
         const r = deps.mem?.purgeRaw?.(side, body?.sids)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
     }
 
     // 钉子审批：模型只能请求，点头的权力在人这边。
-    if (path === '/api/pin/approve' && method === 'POST') {
-      return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
-        const r = deps.mem?.approvePin?.(side, body?.id)
-        return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
-      }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
-    }
-
-    if (path === '/api/pin/reject' && method === 'POST') {
-      return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
-        const r = deps.mem?.rejectPin?.(side, body?.id)
-        return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
-      }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))
-    }
-
     if (path === '/api/unpin' && method === 'POST') {
       return bodyOf().then((body) => {
-        const side = body?.side === 'work' ? 'work' : 'qingdai'
+        const side = body?.side === 'work' ? 'work' : 'life'
         const r = deps.mem?.unpin?.(side, body?.id)
         return send(200, { ok: Boolean(r?.ok), side, result: r ?? null })
       }).catch((e) => send(400, { ok: false, error: String(e?.message ?? e) }))

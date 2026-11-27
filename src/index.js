@@ -7,18 +7,17 @@
 //
 // 模块分工：
 //   db.js        双库建库建表
-//   routing.js   会话 → 库（wakeSessions → qingdai / 其余 → work）
+//   routing.js   会话 → 库（wakeSessions → life / 其余 → work）
 //   heat.js      遗忘曲线（一条线，一个阈值；五档全在同一条曲线上）
 //   memory.js    mem_write / mem_search 纯逻辑
 //   turn.js      每轮留底（events 表，永不删）
 //   vector.js    嵌入 + 精排（siliconflow bge-m3）
-//   extract.js   压缩时提炼记忆节点（LLM + 规则兜底）
 //   secrets.js   密钥嗅探
 //   tools.js     三个模型工具的定义
 //   wake/        主动开口（session/mount/allowlist/core/meme/…）
 //
 // 【白名单唯一源】wakeSessions（wake/settings.js 管）。记忆路由与主动开口共用它，
-//   避免两份名单漂移（moodmem-v2 时代跨插件读白名单的坑）。
+//   避免两份名单漂移。
 // 【sid 拿不到 → 拒写不猜库】写错方向比读不到更糟。
 
 import { mkdirSync, writeFileSync, renameSync, appendFileSync, existsSync, statSync } from 'node:fs'
@@ -28,11 +27,9 @@ import { dbPlanFor, sidFrom, DB_NAMES, DB_DIRS } from './routing.js'
 import { TOOLS as MEM_TOOLS, buildTools as buildMemTools } from './tools.js'
 import { runMemWrite, runMemSearch, runRawMemory, paramsToSchema } from './tools.js'
 import { flushPending, loadVectors, embedTexts, cosine, rerank as rerankApi, signatureOf } from './vector.js'
-// extractFromEvents 保留但不自动调：它能从留底里补提炼一批节点，
-// 只在「模型长期不写、要手动补」时用（scripts 或面板按钮）。
 import { recordEvent, eventText, OWNER_SOURCES } from './turn.js'
 import { createRecaller, useRecallStore, clearRecallDedupe } from './inject.js'
-import { sweep, restoreFromGraveyard, unsupersede, openConflicts, resolveConflict as resolveConflictIn, forgetMemory, markUsed, purgeGraveyard, recentInjected, countInjectedSince, lastInjectBatch } from './memory.js'
+import { sweep, restoreFromGraveyard, unsupersede, openDecisions, setDecisionSuggestion, resolveDecision, forgetMemory, markUsed, purgeGraveyard, recentInjected, countInjectedSince, lastInjectBatch } from './memory.js'
 import { keepOf, daysLeftOf, halfLifeOf, tierOf, frozenKeepOf, TIERS, CURVE } from './heat.js'
 import { liveSessions, rawStats, rawBySession, listEvents, orphanSessions, purgeSessions, pruneEvents, rawMonths } from './raw.js'
 
@@ -246,7 +243,7 @@ export function createApp(ctx, config = {}) {
 
   // ---- 记忆注入：这一轮可能用得上的旧事，自动带到眼前 ----
   //
-  // 路数照 dsh-memory-tiers：主人一开口就异步预取（不阻塞这一轮），
+  // 主人一开口就异步预取（不阻塞这一轮），
   // 组装提示词时读已经落地的结果；注入过就清掉，同一轮不重复塞。
   // 位置必须在消息区（context() 或 pre-step），**不许进 systemPrompt.section**——
   // 系统段每轮变，整个历史前缀的缓存就废了（wake.js:40 的老教训）。
@@ -276,7 +273,7 @@ export function createApp(ctx, config = {}) {
     },
     clear() {
       try {
-        for (const side of ['qingdai', 'work']) {
+        for (const side of ['life', 'work']) {
           openDb(sideDbPath(dataDir, side)).prepare('DELETE FROM recall_sent').run()
         }
       } catch { /* 清不掉不影响 */ }
@@ -415,7 +412,7 @@ export function createApp(ctx, config = {}) {
         const plan = dbPlanFor(sid, dataDir, cfg.wakeSessions)
         if (!plan.ok) return
         const db = openDb(plan.db)
-        const anySource = plan.side === 'qingdai'   // 生活会话宽松，工作会话严
+        const anySource = plan.side === 'life'   // 生活会话宽松，工作会话严
         const r = recordEvent(db, session, event, { anySource })
         // 每种跳过原因只记一次（宿主注入的提醒每轮都有，全记会刷屏）。
         // 但「哪个来源被拒了」必须留痕——来源写错的表现就是「她说的话没进留底」，
@@ -439,10 +436,8 @@ export function createApp(ctx, config = {}) {
   //   同一件事被模型写一遍、又被提炼器抽一遍，措辞不同就是两条；
   //   而模型自己在场、有完整上下文，判断比事后从留底里猜准得多。
   //   所以提炼不自动跑，只保留压缩后的提醒——把「记不记」交还给模型。
-  //   （dsh-plastic-memory 同款取舍：它压根没有自动提炼，全靠模型自己在对话里写。）
+  //   自动提炼不启用，全靠模型自己在对话里写。
   // 【为什么提醒放压缩后】压缩前注入会被一起压掉；压缩后注入能确保模型读到。
-  // 【extract.js 现状】批量提炼的函数还在（extractFromEvents），但没有调用点：
-  //   要接手动补提炼，就在面板加一个按钮调它。别接回自动路径。
   try {
     ctx.on('session/event', async (session, event) => {
       if (event?.type !== 'compaction/end') return
@@ -515,7 +510,7 @@ export function createApp(ctx, config = {}) {
     try {
       do {
         vecDirty = false
-        for (const side of ['qingdai', 'work']) {
+        for (const side of ['life', 'work']) {
           const n = await drainOneDb(side)
           if (n) log(`向量 ${side}：+${n}`)
         }
@@ -536,7 +531,7 @@ export function createApp(ctx, config = {}) {
   // ---- 生命周期惰性扫（不用定时器：开关机各扫一次） ----
   try {
     setTimeout(() => {
-      for (const side of ['qingdai', 'work']) {
+      for (const side of ['life', 'work']) {
         try {
           const db = openDb(sideDbPath(dataDir, side))
           const r = sweep(db)
@@ -558,9 +553,8 @@ export function createApp(ctx, config = {}) {
   armWakeTimer()
   try { ctx.effect?.(() => () => { if (wakeTimer !== null) clearInterval(wakeTimer) }, 'qingdai-core: wake timer') } catch { /* 没 effect 算了 */ }
   // boot wake：插件加载 5 秒后补一次检查。
-  // 【为什么带冷却】重启 ≠ 想说话。以前每次重载（改配置、重启 DSH、插件热挂）都无条件
-  // 试一次，只要「够久没聊」那道闸开着就直接再投一条。2026-11-25 10:33 和 10:34 连着
-  // 两次重启，就各投了一条，微信那边连着收到两条「[自己醒的]」。
+  // 【为什么带冷却】重启 ≠ 想说话。每次重载（改配置、重启、插件热挂）都无条件
+  // 试一次，只要「够久没聊」那道闸开着就直接再投一条——连着重启两次就收到两条「[自己醒的]」。
   // 冷却只挡「刚开过口又赶上重启」这一种，定时器照常，不干预正常节奏。
   const BOOT_WAKE_COOLDOWN_MS = 10 * 60_000
   const bootTimer = setTimeout(() => {
@@ -590,7 +584,7 @@ export function createApp(ctx, config = {}) {
       readJson,
       getCfg,
       mem: {
-        /** 某一侧的记忆列表。side: qingdai | work */
+        /** 某一侧的记忆列表。side: life | work */
         list(side, { limit = 100, offset = 0, q = '', showSuperseded = false } = {}) {
           const db = openDb(sideDbPath(dataDir, side))
           const where = []
@@ -685,7 +679,7 @@ export function createApp(ctx, config = {}) {
         rawSessions(side) {
           const db = openDb(sideDbPath(dataDir, side))
           // 会话存档在 $DSH_HOME/sessions/<桶>/<session-id>/，不在插件自己的 dataDir 下。
-          // 以前这里拼的是 join(dataDir,'sessions')——那个目录根本不存在，扫出来永远空集，
+          // 目录必须用 $DSH_HOME/sessions/<桶>/<session-id>/，拼错目录会扫出空集，
           // 于是一条活跃会话都被判成「已死」，孤儿数 = 全会话数，点一次「清孤儿」就清空整个库。
           let live = null
           try { live = liveSessions(sessionsRoot()) } catch { live = null }
@@ -698,7 +692,7 @@ export function createApp(ctx, config = {}) {
           }))
           const orphan = canJudge ? orphanSessions(db, live) : { ok: true, rows: [], count: 0, bytes: 0 }
           // orphanSessions 返回的是对象 {ok, rows, bytes, count}，不是数组。
-          // 以前写成 orphan.length —— 永远 undefined，面板上「清孤儿会话」显示 0 个且按钮置灰。
+          // 取错字段时面板上「清孤儿会话」显示 0 个且按钮置灰。
           const orphanCount = Array.isArray(orphan?.rows) ? orphan.rows.length : 0
           return { ok: true, rows, canJudge, orphanCount, orphan }
         },
@@ -797,7 +791,7 @@ export function createApp(ctx, config = {}) {
             vectors: one('SELECT COUNT(*) AS n FROM vectors'),
             events: one('SELECT COUNT(*) AS n FROM events'),
             graveyard: one('SELECT COUNT(*) AS n FROM graveyard'),
-            conflicts: one("SELECT COUNT(*) AS n FROM conflicts WHERE state = 'open'"),
+            conflicts: one("SELECT COUNT(*) AS n FROM decisions WHERE state = 'open' AND kind = 'conflict'"),
             tiers: TIERS,
           }
         },
@@ -811,38 +805,31 @@ export function createApp(ctx, config = {}) {
         pending(side, { limit = 50 } = {}) {
           const db = openDb(sideDbPath(dataDir, side))
           const lim = Math.max(1, Math.min(200, Number(limit) || 50))
-          const rows = db.prepare(
-            `SELECT m.id, m.text, m.importance, m.createdAt, m.supersededBy,
-                    k.id AS keeperId, k.text AS keeperText, k.createdAt AS keeperAt
-             FROM memories m
-             LEFT JOIN memories k ON k.id = m.supersededBy
-             WHERE m.superseded = 1
-             ORDER BY m.createdAt DESC LIMIT ?`,
-          ).all(lim)
+          // 所有待办都在 decisions 账本里，建议是条目字段。
+          const decisions = openDecisions(db, { limit: lim })
+          const memIds = decisions.filter((d) => d.kind === 'pin' && d.payload?.memoryId != null)
+            .map((d) => Number(d.payload.memoryId))
+          const memMap = new Map()
+          if (memIds.length) {
+            const marks = memIds.map(() => '?').join(',')
+            for (const m of db.prepare(
+              `SELECT id, text, importance, createdAt, sources, pinned FROM memories WHERE id IN (${marks})`,
+            ).all(...memIds)) {
+              memMap.set(Number(m.id), {
+                id: Number(m.id),
+                text: String(m.text ?? ''),
+                importance: Number(m.importance) || 0.6,
+                at: Number(m.createdAt) || 0,
+                sources: m.sources ? JSON.parse(String(m.sources)) : undefined,
+                pinned: Boolean(m.pinned),
+              })
+            }
+          }
+          for (const d of decisions) {
+            if (d.kind === 'pin') d.payload.memory = memMap.get(Number(d.payload.memoryId)) ?? null
+          }
           return {
-            replaced: rows.map((r) => ({
-              id: Number(r.id),
-              text: String(r.text ?? ''),
-              importance: Number(r.importance) || 0.6,
-              createdAt: Number(r.createdAt) || 0,
-              keeperId: r.keeperId == null ? null : Number(r.keeperId),
-              keeperText: r.keeperText == null ? null : String(r.keeperText),
-              keeperAt: r.keeperAt == null ? null : Number(r.keeperAt),
-            })),
-            conflicts: openConflicts(db, { limit: lim }),
-            pinRequests: db.prepare(
-              `SELECT id, text, importance, pinRequest, pinRequestAt, createdAt
-               FROM memories
-               WHERE pinRequest IS NOT NULL AND superseded = 0 AND pinned = 0
-               ORDER BY pinRequestAt DESC LIMIT ?`,
-            ).all(lim).map((r) => ({
-              id: Number(r.id),
-              text: String(r.text ?? ''),
-              importance: Number(r.importance) || 0.3,
-              reason: String(r.pinRequest ?? ''),
-              at: Number(r.pinRequestAt) || Number(r.createdAt) || 0,
-            })),
-            // 已经钉住的：给个能解开的地方。老库里按 0.9 自动钉的那些也从这里下。
+            decisions,
             pinned: db.prepare(
               `SELECT id, text, importance, frozenKeep, createdAt
                FROM memories WHERE pinned = 1 AND superseded = 0
@@ -866,10 +853,15 @@ export function createApp(ctx, config = {}) {
             })),
           }
         },
-        /** 处理一条待审冲突：replace 替代旧的 / keep 两条都留 / drop 算了。 */
-        resolveConflict(side, { id, action }) {
+        /** 给一条待办写建议（账本条目字段）。 */
+        setDecisionSuggestion(side, id, suggestion) {
           const db = openDb(sideDbPath(dataDir, side))
-          return resolveConflictIn(db, { id: Number(id), action: String(action ?? '') })
+          return setDecisionSuggestion(db, Number(id), suggestion)
+        },
+        /** 裁决一条待办：agree 按申请办 / reject 不办。 */
+        resolveDecision(side, { id, action }) {
+          const db = openDb(sideDbPath(dataDir, side))
+          return resolveDecision(db, { id: Number(id), action: String(action ?? '') })
         },
         /** 撤销一次替代（旧的回来，替它的那条下去）。 */
         unsupersede(side, id) {
@@ -942,7 +934,7 @@ export function createApp(ctx, config = {}) {
       // 记忆层状态（面板展示用）
       memory: () => {
         const out = {}
-        for (const side of ['qingdai', 'work']) {
+        for (const side of ['life', 'work']) {
           try {
             const db = openDb(sideDbPath(dataDir, side))
             out[side] = db.prepare('SELECT COUNT(*) AS n FROM memories WHERE superseded = 0').get().n
@@ -981,11 +973,11 @@ export function createApp(ctx, config = {}) {
  * 一侧（生活/工作）的库文件路径。面板和统计共用这一处，别再各写一遍三元表达式。
  *
  * 【磁盘名 vs 内部标识】磁盘上生活库叫 life/life.db（更通用，开源出去别人也好懂），
- * 但内部 side 值、API 参数、面板选项卡仍用 'qingdai'（历史兼容，改它牵连太广且没收益）。
+ * 但内部 side 值、API 参数、面板选项卡仍用 'life'（历史兼容，改它牵连太广且没收益）。
  * 这里就是两者的唯一映射点。
  */
 function sideDbPath(dataDir, side) {
-  const s = side === 'work' ? 'work' : 'qingdai'
+  const s = side === 'work' ? 'work' : 'life'
   return join(dataDir, DB_DIRS[s], DB_NAMES[s])
 }
 

@@ -25,7 +25,7 @@ export function runMemWrite(deps, args = {}) {
 export async function runMemSearch(deps, args = {}) {
   const { db, vectors, cosine, queryVec, now, rerank, cfg } = deps
   const limit = Math.max(1, Math.min(20, Number(args.limit) || 6))
-  // 有精排时放宽粗排闸（memory-tiers 口径：粗排只是噪音底，判定交给 reranker）
+  // 有精排时放宽粗排闸：粗排只是噪音底，判定交给 reranker
   const gate = rerank ? { ...SEARCH_DEFAULTS, ...(cfg || {}), minSem: 0.5 } : cfg
   const base = memSearchLocal(db, { ...args, limit: limit * 2 }, { now, vectors, cosine, queryVec, cfg: gate })
   if (!base?.ok || !base.hits?.length || typeof rerank !== 'function') return base
@@ -87,7 +87,7 @@ export function runRawMemory(deps, args = {}) {
 /**
  * 工具参数 → JSON Schema。**两处注册共用这一份**（记忆工具 / 开口工具）。
  *
- * 原来这里有两个实现，规则还不一样：
+ * 两处参数形状必须一致：
  *   记忆那处认 items 不认 enum，简写参数一律没有必填；
  *   开口那处认 enum 不认 items，简写参数必填第一个。
  * 两套并存意味着「同样的 params 写法，走哪条路得到不同的 schema」，迟早出错。
@@ -169,6 +169,8 @@ export function buildTools({ ownerName = '主人', selfName = '我' } = {}) {
       from: { type: 'string', enum: ['user', 'self', 'env'], description: '这条怎么来的：user=他亲口说的（默认）、self=你自己归纳的、env=从环境/文件里看到的' },
       requestPin: { type: 'boolean', description: '请求把这条钉住（永不遗忘）。会进待办由主人裁决，不是立刻生效' },
       pinReason: { type: 'string', description: '想钉住它的理由，一句话。主人要凭这个点头' },
+      suggest: { type: 'string', enum: ['agree', 'reject'], description: '你的处理建议：被查重拦下 / 改了口进待办时一起给出。agree=用新写的替掉旧的，reject=不写、留旧的' },
+      suggestReason: { type: 'string', description: '为什么这么建议，一两句。主人凭这个决定，别写空话' },
     },
     run: runMemWrite,
     render: (r) => {
@@ -179,6 +181,7 @@ export function buildTools({ ownerName = '主人', selfName = '我' } = {}) {
           for (const h of r.existing ?? []) {
             lines.push(`  #${h.id} ${h.text}`)
           }
+          lines.push(r.hasSuggestion ? '已把我的建议一起放进待办，等主人裁决。' : '待办里还没建议——下次被拦时带 suggest 一并给出。')
           return lines.join('\n')
         }
         if (r.needsConfirm) return `先问${OWNER}：${r.reason}`

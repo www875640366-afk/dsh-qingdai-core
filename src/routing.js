@@ -1,7 +1,7 @@
 // routing.js —— 会话 → 库的路由。分库隔离的唯一裁判。
 //
 // 【规则只有一条，不由内容猜】
-//   sid ∈ wakeSessions（白名单）→ qingdai 库
+//   sid ∈ wakeSessions（白名单）→ life 库
 //   其余                        → work 库
 //   sid 拿不到                  → 拒绝，报原因。**绝不猜库**——
 //     写错方向比读不到更糟（v2 index.js:184 的教训原话）。
@@ -13,10 +13,10 @@
 
 import { join } from 'node:path'
 
-// 磁盘名 vs 内部标识：side 值仍是 'qingdai'（API/面板兼容），
+// 磁盘名 vs 内部标识：side 值仍是 'life'（API/面板兼容），
 // 但磁盘上生活库叫 life/life.db（更通用）。这里是路径映射的唯一来源。
-export const DB_NAMES = Object.freeze({ qingdai: 'life.db', work: 'work.db' })
-export const DB_DIRS = Object.freeze({ qingdai: 'life', work: 'work' })
+export const DB_NAMES = Object.freeze({ life: 'life.db', work: 'work.db' })
+export const DB_DIRS = Object.freeze({ life: 'life', work: 'work' })
 
 /**
  * 这个会话是不是白名单会话。
@@ -35,17 +35,17 @@ export function isQingdaiSession(sid, sessions = []) {
  * @param {string} sid             会话 id（必须非空）
  * @param {string} dataDir         库所在目录（…/storages/qingdai-core）
  * @param {string[]} sessions      当前生效的白名单
- * @returns {{ok:true, db:string, side:'qingdai'|'work'} | {ok:false, reason:string}}
+ * @returns {{ok:true, db:string, side:'life'|'work'} | {ok:false, reason:string}}
  */
 export function dbPlanFor(sid, dataDir, sessions = []) {
   const id = String(sid ?? '').trim()
   if (!id) return { ok: false, reason: '拿不到会话 id，拒绝写入（不猜库）' }
-  const side = isQingdaiSession(id, sessions) ? 'qingdai' : 'work'
+  const side = isQingdaiSession(id, sessions) ? 'life' : 'work'
   return { ok: true, db: join(dataDir, DB_DIRS[side], DB_NAMES[side]), side }
 }
 
 /**
- * 从宿主装配体里挖会话 id（memory-tiers index.mjs:944 同款多级兜底）。
+ * 从宿主装配体里挖会话 id（多级兜底）。
  * 工具 execute 的 exec.agent、事件的 session 对象都长这个形状。
  */
 export function sidFrom(anyAgentish) {

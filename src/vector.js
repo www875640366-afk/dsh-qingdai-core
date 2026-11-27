@@ -2,14 +2,13 @@
 //
 // 【为什么向量不在写路径上】mem_write 只落词条（vectorPending:true），
 //   向量由 flushPending() 按 vec_state 补算：402 / 网络挂 → 词条不丢，下次谁触发谁接着补。
-//   memory-tiers 的血泪：写路径耦合云端 API，API 挂一次 graveyard 陪葬 554 条。
+//   写路径不耦合云端 API，嵌入服务挂掉只影响向量，不影响词条落库。
 //
-// 【签名】沿用 memory-tiers 的口径：embedSignature = 'api:BAAI/bge-m3'。
+// 【签名】embedSignature = 'api:BAAI/bge-m3'。
 //   换模型 = 全部向量作废重算，meta 里记签名，不匹配就拒绝混用（VEC_STALE）。
 //
 // 存储：每库一张 vectors 表（id → BLOB float32），meta 存 sig/dim/count。
 
-import { writeFileSync, renameSync, readFileSync } from 'node:fs'
 
 export const DEFAULT_EMBED_MODEL = 'BAAI/bge-m3'
 export const DEFAULT_RERANK_MODEL = 'BAAI/bge-reranker-v2-m3'
@@ -22,7 +21,7 @@ export const signatureOf = (model) => `api:${String(model || DEFAULT_EMBED_MODEL
 /** 老名字留给已有代码/测试。 */
 export const EMBED_SIGNATURE = signatureOf(DEFAULT_EMBED_MODEL)
 export const EMBED_DIM = 1024
-const TEXT_SLICE = 512        // 超长文本截断再嵌入（memory-tiers 同款）
+const TEXT_SLICE = 512        // 超长文本截断再嵌入
 const BATCH = 32
 
 /** meta 表读写（meta 在 db.js 的 SCHEMA 里，每库都有）。 */
@@ -226,7 +225,7 @@ export function cosine(a, b) {
 }
 
 /**
- * 精排：rerank API。失败返回 null（调用方退回粗排分，memory-tiers 同款）。
+ * 精排：rerank API。失败返回 null（调用方退回粗排分）。
  */
 export async function rerank(query, docs, { apiKey, baseUrl, model, path, fetchImpl, timeoutMs = 20_000 } = {}) {
   const key = String(apiKey ?? process.env.SILICONFLOW_KEY ?? process.env.SILICONFLOW_API_KEY ?? '').trim()
@@ -253,38 +252,4 @@ export async function rerank(query, docs, { apiKey, baseUrl, model, path, fetchI
   }
 }
 
-/** 导出留底/迁移用：整库向量备份成 JSON（id → base64）。 */
-export function dumpVectors(db, file) {
-  const out = {}
-  for (const row of db.prepare('SELECT id, vec FROM vectors').all()) {
-    out[String(row.id)] = Buffer.from(row.vec).toString('base64')
-  }
-  const tmp = file + '.tmp'
-  writeFileSync(tmp, JSON.stringify({ sig: EMBED_SIGNATURE, dim: EMBED_DIM, count: Object.keys(out).length, vectors: out }), 'utf8')
-  renameSync(tmp, file)
-  return { ok: true, count: Object.keys(out).length, file }
-}
 
-/** 从 JSON 备份恢复（迁移/回滚用）。签名不匹配拒绝。 */
-export function restoreVectors(db, file) {
-  let data
-  try { data = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { return { ok: false, reason: String(e?.message ?? e) } }
-  if (data?.sig !== EMBED_SIGNATURE) return { ok: false, reason: `VEC_STALE ${data?.sig} → ${EMBED_SIGNATURE}` }
-  if (Number(data?.dim) !== EMBED_DIM) return { ok: false, reason: `dim 不匹配：${data?.dim} → ${EMBED_DIM}` }
-  const up = db.prepare('INSERT OR REPLACE INTO vectors (id, vec) VALUES (?, ?)')
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    for (const [id, b64] of Object.entries(data.vectors ?? {})) {
-      const buf = Buffer.from(String(b64), 'base64')
-      if (buf.length === EMBED_DIM * 4) up.run(Number(id), buf)
-    }
-    db.exec('COMMIT')
-  } catch (e) {
-    try { db.exec('ROLLBACK') } catch { /* 同上 */ }
-    return { ok: false, reason: String(e?.message ?? e) }
-  }
-  writeMeta(db, 'vec_sig', EMBED_SIGNATURE)
-  const { n } = db.prepare('SELECT COUNT(*) AS n FROM vectors').get()
-  writeMeta(db, 'vec_count', String(n))
-  return { ok: true, count: Number(n) }
-}

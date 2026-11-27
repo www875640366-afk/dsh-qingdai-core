@@ -1,7 +1,7 @@
 // db.js —— 双库建库建表（node:sqlite 内置，零外部依赖）。
 //
 // 两个物理库：life/life.db（白名单会话）/ work/work.db（其余会话）。
-// 注意：磁盘叫 life，但内部 side 值仍是 qingdai（路径映射见 routing.js 的 DB_DIRS/DB_NAMES）。
+// side 值统一用 life，磁盘库 life/life.db。路径映射见 routing.js 的 DB_DIRS/DB_NAMES。
 // 路由在 routing.js，这里只管「给一个路径，开出一张结构正确的库」。
 //
 // 【为什么不用全局单连接】v2 的老规矩：谁要库，谁 openDb(path)。
@@ -87,24 +87,25 @@ CREATE TABLE IF NOT EXISTS graveyard (
   at         INTEGER NOT NULL
 );
 
--- 待审冲突：模型想记一条，查重发现库里已经有很像的，被拦下了。
+-- 待办账本：所有待办条目唯一的一张表，处理建议是它的一个字段。
+-- 【为什么统一成一张】待办如果分表存，建议只能另开一张表按 decisionId 挂，
+--   待办处理掉之后建议行会永远留着、越积越多，还得额外写清理去擦。
+--   「待办即账本条目、建议是条目字段」，条目结清即收走。
 --
--- 【为什么被拦也算一件事】拦下来不是失败，是「这条到底算新事还是同一件事改了口」——
---   得有人拍板。模型自己带 force/supersedes 重发就绕过去了，人永远不知道发生过什么。
---   记在这里，面板才看得见、才能替它决定。
---
--- 【against 存快照】旧记忆可能在这条待审期间被别处改掉或替代，快照留着才能对照。
-CREATE TABLE IF NOT EXISTS conflicts (
+-- kind: conflict（写新内容二选一）/ pin（钉住审批）/ write（疑似密钥待写审批）
+-- payload: 各 kind 自己的字段，JSON
+-- suggestion: 处理建议 JSON，字段级，不单独存表
+-- state: open / resolved（同意）/ dropped（拒绝）
+CREATE TABLE IF NOT EXISTS decisions (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  text       TEXT NOT NULL,
-  importance REAL,
-  againstId  INTEGER,
-  against    TEXT,
-  reason     TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  suggestion TEXT,
+  state      TEXT NOT NULL DEFAULT 'open',
   at         INTEGER NOT NULL,
-  state      TEXT NOT NULL DEFAULT 'open'
+  settledAt  INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_conflicts_state ON conflicts(state, at);
+CREATE INDEX IF NOT EXISTS idx_decisions_state ON decisions(state, at);
 
 -- 留底表：每轮对话原文（发生过什么），与记忆层（值得记住什么）并行。
 -- 默认长期保留：记忆节点靠 sources 指回这里的 seq，是溯源与纠错的唯一真值。
