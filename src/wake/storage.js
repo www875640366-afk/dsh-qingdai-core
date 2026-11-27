@@ -59,7 +59,7 @@ export function writeState(file, state) {
 
 /** 内存 + 文件的小封装，读写都走它。
  *
- *  **按 mtime 判定文件有没有被别处改过**：原来只在第一次读进来，之后永远返回内存那份，
+ *  **按 mtime 判定文件有没有被别处改过**：只在第一次读进来会导致第二个实例写的状态
  *  于是第二个实例写的状态这个实例再也看不见（双开时两套 5 分钟栅格就是这么来的）。
  *  现在每次 get 顺手 stat 一下，文件时间戳变了就重读；单实例下 stat 成本是微秒级。
  *  写完之后要把时间戳同步成新值，否则下一次 get 会白读一遍。
@@ -108,7 +108,7 @@ export function createStore(file) {
  * 按本地日期切，跨天自动清零（不用定时器去清）。
  * dayKey 本身在 heat.js（那边也按同一种日期格式分桶），这里只转出去，别再写第二份。
  */
-// import 是给本文件内部用的；再 export 一次让原来从 storage 引 dayKey 的地方不用改。
+// import 供本文件内部使用；同时再导出，供外部从 storage 取 dayKey。
 import { dayKey } from '../heat.js'
 export { dayKey }
 

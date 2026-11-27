@@ -76,7 +76,7 @@ export function gates({
   // 3) 多久没聊
   const silent = Number(silentMinutes) > 0 ? Number(silentMinutes) : 360
   const talk = Number(lastTalkAt) || 0
-  // 0 = 从来没记到主人在说话。以前这里 `talk > 0 &&` 会把这种情况**跳过**，
+  // 0 = 从来没记到主人在说话。这种情况要**跳过**判定，
   // 于是插件刚装好、5 秒后的 boot wake 就可能立刻开口。没记录不是「聊完了」，
   // 是「还不知道」，这种时候宁可安静：面板上点一下就能手动触发。
   if (talk <= 0) return blocked('no-talk-record', '还没记到主人在说话，先不主动开口')

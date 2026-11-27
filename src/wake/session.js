@@ -58,14 +58,13 @@ export function lastTalkAtOf(session) {
       const isHer = ev?.type === 'assistant/message'
       if (!isOwner && !isHer) continue
       // 时间戳字段名要对：宿主的事件形状是 `{type, seq, time, data}`，
-      // 顶层的 `time` 才是毫秒时间戳。以前只认 ts/at/data.ts，全落空 →
+      // 顶层的 `time` 才是毫秒时间戳。只认 ts/at/data.ts 会全落空 →
       // 每条都被当成「没有时间戳」跳过 → 返回 0 → lastTalkAt 再也不更新，
-      // 「多久没聊」那道闸一直用着几天前的旧值。2026-11-25 10:20 主人在
-      // 会话里说了话，10:24 / 10:29 还是照常把她叫醒，就是这么来的。
+      // 「多久没聊」那道闸一直用着几天前的旧值，会话里明明说了话还是照常被叫醒。
       const ts = Number(ev?.ts ?? ev?.at ?? ev?.time ?? ev?.data?.ts ?? ev?.data?.time)
       if (Number.isFinite(ts) && ts > 0) return ts
       // 这条没有时间戳：**跳过，继续往前找**。
-      // 以前这里是 return Date.now()——拿不到时间就把「现在」当成「上次说话」，
+      // 不能 fallback 成 Date.now()——拿不到时间就把「现在」当成「上次说话」，
       // 于是「多久没聊」那道闸门永远判成刚聊过，主动开口再也不会触发。
       continue
     }

@@ -70,8 +70,8 @@ export function wakePrompt({ now = Date.now(), lastTalkAt = 0, existedDays = 0, 
  * preset 插件（persona / instructions / planning / fs / bash / 搜网 / skill / todo…）
  * 是在 `setup` 里挂的 —— 见 dsh-api-session-controller/lib/index.js:361。
  * 只传 resumeSessionId 得到一个「没有 preset 的 agent」：内置工具一个都没有，
- * 只剩宿主平面注册的那些，而且会话照样能跑、不报错。2026-11-25 09:04→10:04
- * 就是把生活会话的 13 个工具这么吃掉的（session-8de4a885 的 seq 1494/1495）。
+ * 只剩宿主平面注册的那些，而且会话照样能跑、不报错——这会把生活会话的
+ * 十来个工具整个吃掉，而且没有任何报错。
  *
  * 为什么放 try 里、且失败只 warn：拿不到会话比 preset 缺失更糟，投递优先。
  * 但一定要留痕 —— 这次的坑就是静默掉的。
