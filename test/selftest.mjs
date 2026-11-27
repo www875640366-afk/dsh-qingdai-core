@@ -9,14 +9,13 @@ import { openDb, withTransaction, closeDb } from '../src/db.js'
 import { dbPlanFor, isQingdaiSession, sidFrom } from '../src/routing.js'
 import { halfLifeOf, keepOf, daysLeftOf, tierOf, touch, sweepLifecycle, dayKey, CURVE, TIERS } from '../src/heat.js'
 import { sniffSecret } from '../src/secrets.js'
-import { memWrite, memSearch, markUsed, forgetMemory, restoreFromGraveyard, recentInjected, unsupersede, openConflicts, resolveConflict, keywordsOf, sweep, purgeGraveyard } from '../src/memory.js'
+import { memWrite, memSearch, markUsed, forgetMemory, restoreFromGraveyard, recentInjected, unsupersede, openDecisions, resolveDecision, keywordsOf, sweep, purgeGraveyard } from '../src/memory.js'
 import { recordEvent, queryEvents, seqRangeCovered } from '../src/turn.js'
 import { cosine, checkSignature, loadVectors, flushPending, pendingVectorCount, embedTexts, rerank, signatureOf, readMeta, EMBED_DIM } from '../src/vector.js'
-import { extractFromEvents } from '../src/extract.js'
 import { runMemSearch } from '../src/tools.js'
 import { applyToolRestrict, denyListOf } from '../src/wake/allowlist.js'
 import { readCompactionConfig, saveCompactionConfig, readSelfConfig, saveSelfConfig, readModelCatalogue, needsRestart, RESTART_KEYS, DEFAULTS } from '../src/wake/settings.js'
-import { createRecaller, renderRecall, RECALL } from '../src/inject.js'
+import { createRecaller, buildRecall, RECALL } from '../src/inject.js'
 
 // 用 fileURLToPath 而不是 URL.pathname：后者返回的是 URL 编码路径，
 // 仓库路径里有中文时会被编成 %E6%8F%92%E4%BB%B6，临时库就建到那个假目录里去了。
@@ -55,7 +54,7 @@ await t('白名单→qingdai / 其余→work / 无sid拒绝', () => {
   const dir = TMP
   const sessions = ['session-21ed5b01']
   const a = dbPlanFor('session-21ed5b01', dir, sessions)
-  assert.strictEqual(a.side, 'qingdai')
+  assert.strictEqual(a.side, 'life')
   const b = dbPlanFor('session-other', dir, sessions)
   assert.strictEqual(b.side, 'work')
   const c = dbPlanFor('', dir, sessions)
@@ -205,10 +204,13 @@ await t('memWrite：requestPin 只落请求，不落钉子', () => {
   const r = memWrite(db, { text: '对方说 2027 年春节一起回杭州', importance: 0.9, requestPin: true, pinReason: '不可重来的约定' })
   assert.ok(r.ok)
   assert.strictEqual(r.pinRequest, true)
-  const row = db.prepare('SELECT pinned, pinRequest, pinRequestAt FROM memories WHERE id = ?').get(r.id)
+  const row = db.prepare('SELECT pinned FROM memories WHERE id = ?').get(r.id)
   assert.strictEqual(Number(row.pinned), 0, '请求不能直接变成钉子')
-  assert.strictEqual(row.pinRequest, '不可重来的约定')
-  assert.ok(Number(row.pinRequestAt) > 0)
+  // 请求本身进账本，等主人点头
+  const list = openDecisions(db).filter((d) => d.kind === 'pin')
+  const mine = list.find((d) => d.payload.memoryId === r.id)
+  assert.ok(mine !== void 0, '钉住请求该开一条账本条目')
+  assert.strictEqual(mine.payload.reason, '不可重来的约定')
 })
 await t('memSearch：关键词降级可用，且不再偷偷记账', () => {
   const before = db.prepare('SELECT accessCount FROM memories WHERE text LIKE ?').get('%生日%')
@@ -257,19 +259,37 @@ await t('graveyard 恢复：捡回来只回 50%，不满血', () => {
   const left = daysLeftOf({ importance: back.importance, accessCount: 0, lastTouchedAt: back.lastTouchedAt }, now)
   assert.ok(left > 40 && left < 55, `普通档捡回来该剩约 49 天，实际 ${left.toFixed(0)} 天`)
 })
-await t('supersedes：旧条记得被谁替了', () => {
+await t('supersedes：不立即改库，先进待办；同意后才替代', () => {
   db.exec('DELETE FROM memories')
+  db.exec('DELETE FROM decisions')
   const a = memWrite(db, { text: '面板主题色是深海蓝 #4E6E90', importance: 0.6 })
   assert.ok(a.ok)
   const b = memWrite(db, { text: '面板主题色改成月白，深海蓝只留作强调', importance: 0.6, supersedes: [a.id] })
-  assert.ok(b.ok, `写入失败：${b.reason ?? ''}`)
-  assert.deepStrictEqual(b.superseded, [a.id], '应该替代掉旧的那条')
-  const old = db.prepare('SELECT superseded, supersededBy FROM memories WHERE id = ?').get(a.id)
-  assert.strictEqual(old.superseded, 1)
-  assert.strictEqual(old.supersededBy, b.id, '旧条要记下新条的 id')
+  assert.ok(!b.ok && b.pending, '改了口该进待办，不立即生效')
+  const list = openDecisions(db)
+  assert.strictEqual(list.length, 1)
+  assert.strictEqual(list[0].kind, 'conflict')
+  assert.strictEqual(list[0].payload.againstId, a.id)
+  // 裁决前旧条仍是活跃的
+  assert.strictEqual(db.prepare('SELECT superseded FROM memories WHERE id = ?').get(a.id).superseded, 0)
+  const r = resolveDecision(db, { id: list[0].id, action: 'agree' })
+  assert.ok(r.ok, `裁决失败：${r.reason ?? ''}`)
+  // 旧的搬进台账（最近删除），14 天内能捡回来——不是标个状态就两头都不见了
+  const gone = db.prepare('SELECT id FROM memories WHERE id = ?').get(a.id)
+  assert.strictEqual(gone, undefined, '旧条该从活跃记忆里移走')
+  const grave = db.prepare('SELECT originalId FROM graveyard WHERE originalId = ?').get(a.id)
+  assert.ok(grave !== undefined, '旧条该进最近删除')
+  const fresh = db.prepare('SELECT text FROM memories WHERE id = ?').get(r.memoryId)
+  assert.ok(String(fresh.text).includes('月白'), '新的那条该写进库')
 })
 await t('unsupersede：撤销替代，两条不会同时活着', () => {
-  const rows = db.prepare('SELECT id FROM memories WHERE superseded = 1').all()
+  // 自己造一份老数据：新版同意后是搬进台账，不再产生 superseded，这个函数只给老库兜底
+  const now2 = Date.now()
+  const ins2 = db.prepare('INSERT INTO memories (text, importance, createdAt, lastMentionedAt) VALUES (?, ?, ?, ?)')
+  const keeper0 = Number(ins2.run('撤销测试：替它的那条', 0.6, now2, now2).lastInsertRowid)
+  const old0 = Number(ins2.run('撤销测试：被替的那条', 0.6, now2, now2).lastInsertRowid)
+  db.prepare('UPDATE memories SET superseded = 1, supersededBy = ? WHERE id = ?').run(keeper0, old0)
+  const rows = [{ id: old0 }]
   const oldId = rows[0].id
   const keeper = db.prepare('SELECT supersededBy FROM memories WHERE id = ?').get(oldId).supersededBy
   const r = unsupersede(db, oldId)
@@ -301,70 +321,89 @@ await t('pending：替代与遗忘两类分开给', () => {
   assert.strictEqual(rows.length, 1, '活跃的那条不该混进来')
 })
 
-console.log('== 待审冲突（openConflicts）==')
-await t('被查重拦住时留一条待审', () => {
+console.log('== 待办账本（decisions）==')
+await t('被查重拦住时开一条账本条目', () => {
   db.exec('DELETE FROM memories')
-  db.exec('DELETE FROM conflicts')
+  db.exec('DELETE FROM decisions')
   const a = memWrite(db, { text: '面板每屏最多显示 20 条记忆，多了要翻页' })
   assert.ok(a.ok, '第一条该写进去')
   const b = memWrite(db, { text: '面板每屏最多显示 20 条记忆，多了翻页' })
   assert.ok(!b.ok && b.duplicate, '第二条该被拦')
-  assert.ok(b.pendingId > 0, '拦下时要有待审 id')
-  const list = openConflicts(db)
+  assert.ok(b.decisionId > 0, '拦下时要有账本条目 id')
+  const list = openDecisions(db)
   assert.strictEqual(list.length, 1)
-  assert.strictEqual(list[0].againstId, a.id)
-  assert.ok(list[0].againstText.includes('20 条'), '要存下撞上的那条原文')
+  assert.strictEqual(list[0].kind, 'conflict')
+  assert.strictEqual(list[0].payload.againstId, a.id)
+  assert.ok(String(list[0].payload.againstText).includes('20 条'), '要存下撞上的那条原文')
 })
 
 await t('同一条重复撞不刷屏', () => {
-  const before = openConflicts(db).length
+  const before = openDecisions(db).length
   memWrite(db, { text: '面板每屏最多显示 20 条记忆，多了翻页' })
   memWrite(db, { text: '面板每屏最多显示 20 条记忆，多了翻页' })
-  assert.strictEqual(openConflicts(db).length, before, '重试两次不该多出两条待审')
+  assert.strictEqual(openDecisions(db).length, before, '重试两次不该多出两条待办')
 })
 
-await t('resolve replace：B 替掉 A，待审结清', () => {
-  const item = openConflicts(db)[0]
-  const r = resolveConflict(db, { id: item.id, action: 'replace' })
+await t('同意：写新的，旧条进最近删除，条目结清', () => {
+  const item = openDecisions(db)[0]
+  const r = resolveDecision(db, { id: item.id, action: 'agree' })
   assert.ok(r.ok, '处理失败：' + (r.reason ?? ''))
-  assert.deepStrictEqual(r.superseded, [item.againstId])
-  assert.strictEqual(openConflicts(db).length, 0, '处理完该从待审里消失')
-  const a = db.prepare('SELECT superseded FROM memories WHERE id = ?').get(item.againstId)
-  assert.strictEqual(a.superseded, 1, '旧条该进已被替代')
+  assert.strictEqual(r.kind, 'conflict')
+  assert.strictEqual(openDecisions(db).length, 0, '处理完该从待办里消失')
+  const a = db.prepare('SELECT id FROM memories WHERE id = ?').get(item.payload.againstId)
+  assert.strictEqual(a, undefined, '旧条该从活跃记忆里移走')
+  const g = db.prepare('SELECT originalId FROM graveyard WHERE originalId = ?').get(item.payload.againstId)
+  assert.ok(g !== undefined, '旧条该进最近删除（14 天内能捡回来）')
 })
 
-await t('resolve keep：两条都留', () => {
+await t('拒绝：不写，旧的不动', () => {
   db.exec('DELETE FROM memories')
-  db.exec('DELETE FROM conflicts')
-  memWrite(db, { text: '工具命名必须准确反映功能，避免误导' })
-  const b = memWrite(db, { text: '工具命名必须准确反映功能' })
-  assert.ok(!b.ok && b.pendingId > 0, '该被拦')
-  const r = resolveConflict(db, { id: b.pendingId, action: 'keep' })
-  assert.ok(r.ok, '处理失败：' + (r.reason ?? ''))
-  const live = db.prepare('SELECT COUNT(*) AS n FROM memories WHERE superseded = 0').get().n
-  assert.strictEqual(live, 2, '两条都该活着')
-})
-
-await t('resolve drop：不写，旧的不动', () => {
-  db.exec('DELETE FROM memories')
-  db.exec('DELETE FROM conflicts')
+  db.exec('DELETE FROM decisions')
   memWrite(db, { text: '前缀缓存不能破坏' })
   const b = memWrite(db, { text: '前缀缓存不能破坏掉' })
-  assert.ok(!b.ok && b.pendingId > 0, '该被拦')
-  const r = resolveConflict(db, { id: b.pendingId, action: 'drop' })
-  assert.ok(r.ok && r.dropped)
+  assert.ok(!b.ok && b.decisionId > 0, '该被拦')
+  const r = resolveDecision(db, { id: b.decisionId, action: 'reject' })
+  assert.ok(r.ok)
   assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM memories').get().n, 1, '只该有原来那条')
-  assert.strictEqual(openConflicts(db).length, 0)
-  assert.ok(!resolveConflict(db, { id: b.pendingId, action: 'drop' }).ok, '处理过的不能再处理')
+  assert.strictEqual(openDecisions(db).length, 0)
+  assert.ok(!resolveDecision(db, { id: b.decisionId, action: 'reject' }).ok, '处理过的不能再处理')
 })
 
-await t('force 写入不产生待审', () => {
+await t('force 写入不产生待办', () => {
   db.exec('DELETE FROM memories')
-  db.exec('DELETE FROM conflicts')
+  db.exec('DELETE FROM decisions')
   memWrite(db, { text: '面板用深海蓝作强调色' })
   const f = memWrite(db, { text: '面板用深海蓝作强调色吧', force: true })
   assert.ok(f.ok, 'force 该写进去')
-  assert.strictEqual(openConflicts(db).length, 0, 'force 是明确决定，不该再挂待审')
+  assert.strictEqual(openDecisions(db).length, 0, 'force 是明确决定，不该再挂待办')
+})
+
+await t('疑似密钥进账本，同意后才写库', () => {
+  db.exec('DELETE FROM memories')
+  db.exec('DELETE FROM decisions')
+  const a = memWrite(db, { text: '服务商的 api_key 是 abcdefghijklmnopqrstuvwxyz0123' })
+  assert.ok(!a.ok && a.needsConfirm, '疑似密钥该拦下')
+  assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM memories').get().n, 0, '拦下时不该落库')
+  const list = openDecisions(db)
+  assert.strictEqual(list.length, 1)
+  assert.strictEqual(list[0].kind, 'write')
+  const r = resolveDecision(db, { id: a.decisionId, action: 'agree' })
+  assert.ok(r.ok, '同意失败：' + (r.reason ?? ''))
+  assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM memories').get().n, 1, '同意后才该写进去')
+  assert.strictEqual(openDecisions(db).length, 0)
+})
+
+await t('钉住请求进账本，同意后 pinned=1', () => {
+  db.exec('DELETE FROM memories')
+  db.exec('DELETE FROM decisions')
+  const a = memWrite(db, { text: '这条是插件行为准则，改插件都得照着来', requestPin: true, pinReason: '每次都要用' })
+  assert.ok(a.ok, '记忆本身该写进去')
+  const list = openDecisions(db)
+  assert.strictEqual(list.length, 1)
+  assert.strictEqual(list[0].kind, 'pin')
+  const r = resolveDecision(db, { id: list[0].id, action: 'agree' })
+  assert.ok(r.ok)
+  assert.strictEqual(db.prepare('SELECT pinned FROM memories WHERE id = ?').get(a.id).pinned, 1, '同意后该钉住')
 })
 
 console.log('== 查重与出处（dup.js）==')
@@ -403,13 +442,18 @@ await t('force 跳过查重', () => {
   const r = memWrite(db, { text: '对方喜欢喝美式', force: true })
   assert.ok(r.ok, `force 应强写：${JSON.stringify(r).slice(0, 120)}`)
 })
-await t('supersedes：新的替代旧的', () => {
+await t('supersedes：进待办，同意后才替代旧的', () => {
   db.exec('DELETE FROM memories')
+  db.exec('DELETE FROM decisions')
   const a = memWrite(db, { text: '对方喝美式咖啡' })
   const b = memWrite(db, { text: '对方改喝拿铁了（原来喝美式）', supersedes: [a.id] })
-  assert.ok(b.ok && b.superseded.includes(a.id), JSON.stringify(b))
-  const old = db.prepare('SELECT superseded FROM memories WHERE id = ?').get(a.id)
-  assert.strictEqual(old.superseded, 1, '旧条必须标 superseded')
+  assert.ok(!b.ok && b.pending, JSON.stringify(b).slice(0, 120))
+  const r = resolveDecision(db, { id: b.decisionId, action: 'agree' })
+  assert.ok(r.ok)
+  const gone = db.prepare('SELECT id FROM memories WHERE id = ?').get(a.id)
+  assert.strictEqual(gone, undefined, '同意后旧条该从活跃记忆里移走')
+  const grave = db.prepare('SELECT originalId FROM graveyard WHERE originalId = ?').get(a.id)
+  assert.ok(grave !== undefined, '同意后旧条必须进最近删除')
 })
 await t('出处锚：写入时机械填区间', () => {
   db.exec('DELETE FROM memories')
@@ -464,7 +508,7 @@ await t('白名单会话不收窄', () => {
 console.log('== 记忆注入（inject.js）==')
 await t('注入块：标明来源 + 最多 6 条 + 总量 ≤800 字', () => {
   const hits = Array.from({ length: 10 }, (_, i) => ({ when: '2026-11-01', text: `第 ${i + 1} 条旧事，说的是以前发生过的事情` }))
-  const text = renderRecall(hits)
+  const text = buildRecall(hits).text
   assert.ok(text.includes('[系统]'), '要标明是系统给的')
   const lines = (text.match(/^- /gm) || []).length
   assert.ok(lines >= 1 && lines <= 6, `条数 ${lines}`)
@@ -472,15 +516,15 @@ await t('注入块：标明来源 + 最多 6 条 + 总量 ≤800 字', () => {
 })
 await t('注入块：超预算砍尾部', () => {
   const hits = Array.from({ length: 6 }, () => ({ when: '2026-11-01', text: '事'.repeat(200) }))
-  const text = renderRecall(hits)
+  const text = buildRecall(hits).text
   assert.ok(text.length <= RECALL.maxChars, `总量 ${text.length} 超了`)
   const lines = (text.match(/^- /gm) || []).length
   assert.ok(lines >= 1 && lines < 6, `应按预算砍到 ${lines} 条`)
 })
 await t('没有命中就一个字都不注入', () => {
-  assert.strictEqual(renderRecall([]), '')
-  assert.strictEqual(renderRecall(null), '')
-  assert.strictEqual(renderRecall([{ text: '' }]), '')
+  assert.strictEqual(buildRecall([]).text, '')
+  assert.strictEqual(buildRecall(null).text, '')
+  assert.strictEqual(buildRecall([{ text: '' }]).text, '')
 })
 await t('召回器：预取一次只注入一次', async () => {
   let calls = 0
@@ -693,36 +737,6 @@ await t('语义够近才命中；无关一律空', () => {
   assert.strictEqual(r2.hits.length, 0, '双闸都不过必须返回空')
 })
 
-console.log('== LLM 提炼路径（mock stream）==')
-await t('LLM 返回 JSON → 节点解析 → 落库', async () => {
-  const d4 = openDb(TMP + 'test-llm.db')
-  d4.exec('DELETE FROM memories')
-  const mockCtx = {
-    llm: {
-      stream() {
-        const payload = '```json\n[{"text":"对方的生日是 3 月 21 日","importance":0.9},{"text":"见面第一站吃巷口那家面","importance":0.6}]\n```'
-        return (async function* () {
-          for (const ch of payload.match(/.{1,8}/gs) ?? []) yield { type: 'text', text: ch }
-        })()
-      },
-    },
-  }
-  const now = Date.now()
-  const ins = d4.prepare('INSERT INTO events (sid, seq, ts, role, text) VALUES (?,?,?,?,?)')
-  ins.run('sllm', 1, now - 5000, 'user', '我生日是 3 月 21 日，见面第一站去吃巷口那家面')
-  ins.run('sllm', 1, now - 5000, 'assistant', '好，助手记着')
-  const r = await extractFromEvents(mockCtx, { db: d4, sid: 'sllm', dataDir: TMP, sessions: ['sllm'], source: 'test-llm' })
-  assert.ok(r.ok, JSON.stringify(r))
-  // writeNodes 按路由落库（sllm 在白名单 → qingdai 库），所以读路由后的库
-  const plan = dbPlanFor('sllm', TMP, ['sllm'])
-  const dRouted = openDb(plan.db)
-  const mems = dRouted.prepare('SELECT text, importance, pinned FROM memories ORDER BY id').all()
-  assert.strictEqual(mems.length, 2, `应写入 2 条，实际 ${mems.length}`)
-  assert.ok(mems[0].text.includes('生日') && mems[0].pinned === 0, '0.9 也不再自动 pin（永不遗忘得人点头）')
-})
-
-
-// ---- 追加：精排融合 ----
 console.log('== 精排融合 ==')
 await t('mock rerank：按 rel 重排 + 融合分', async () => {
   const d5 = openDb(TMP + 'test-rr.db')

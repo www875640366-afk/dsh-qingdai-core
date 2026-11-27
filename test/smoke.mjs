@@ -230,16 +230,16 @@ await t('列表每条都带剩余天数与档位', async () => {
 })
 
 console.log('== 钉子审批 ==')
-await t('模型请求钉住 → 进待办；同意前不算核心', async () => {
+await t('模型请求钉住 → 进账本待办；同意前不算核心', async () => {
   const w = await call(memWrite, {
     text: '对方说 2027 年春节一起回杭州', importance: 0.9, requestPin: true, pinReason: '不可重来的约定',
   }, QINGDAI)
   assert.ok(w.ok, JSON.stringify(w))
   assert.strictEqual(w.pinRequest, true)
   const p = await hit('/api/pending?side=qingdai')
-  const req = (p.body.pinRequests ?? []).find((x) => x.id === w.id)
+  const req = (p.body.decisions ?? []).find((x) => x.kind === 'pin' && x.payload.memoryId === w.id)
   assert.ok(req, '请求要出现在待办里')
-  assert.strictEqual(req.reason, '不可重来的约定')
+  assert.strictEqual(req.payload.reason, '不可重来的约定')
   const mem = await hit('/api/memories?side=qingdai')
   const row = mem.body.rows.find((x) => x.id === w.id)
   assert.strictEqual(row.tier, 'important', '没点头之前不许算核心')
@@ -247,9 +247,11 @@ await t('模型请求钉住 → 进待办；同意前不算核心', async () => 
 
 await t('同意 → 冻结成核心；解钉 → 回到曲线且不立刻没', async () => {
   const w = await call(memWrite, { text: '临时测试的一条要钉的', importance: 0.3, requestPin: true }, QINGDAI)
-  const ap = await hit('/api/pin/approve', { method: 'POST', body: { side: 'qingdai', id: w.id } })
+  const p = await hit('/api/pending?side=qingdai')
+  const req = (p.body.decisions ?? []).find((x) => x.kind === 'pin' && x.payload.memoryId === w.id)
+  assert.ok(req, '要有待办条目')
+  const ap = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'qingdai', id: req.id, action: 'agree' } })
   assert.ok(ap.body.ok, JSON.stringify(ap.body))
-  assert.ok(ap.body.result.frozenKeep > 0, '要有冻结值')
   let mem = await hit('/api/memories?side=qingdai')
   let row = mem.body.rows.find((x) => x.id === w.id)
   assert.strictEqual(row.tier, 'core', '点头之后才是核心')
@@ -264,10 +266,13 @@ await t('同意 → 冻结成核心；解钉 → 回到曲线且不立刻没', a
 
 await t('不同意 → 请求作废，按正常曲线走', async () => {
   const w = await call(memWrite, { text: '这条会被拒绝钉住', importance: 0.6, requestPin: true }, QINGDAI)
-  const rj = await hit('/api/pin/reject', { method: 'POST', body: { side: 'qingdai', id: w.id } })
-  assert.ok(rj.body.ok, JSON.stringify(rj.body))
   const p = await hit('/api/pending?side=qingdai')
-  assert.ok(!(p.body.pinRequests ?? []).some((x) => x.id === w.id), '拒了就离开待办')
+  const req = (p.body.decisions ?? []).find((x) => x.kind === 'pin' && x.payload.memoryId === w.id)
+  assert.ok(req, '要有待办条目')
+  const rj = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'qingdai', id: req.id, action: 'reject' } })
+  assert.ok(rj.body.ok, JSON.stringify(rj.body))
+  const after = await hit('/api/pending?side=qingdai')
+  assert.ok(!(after.body.decisions ?? []).some((x) => x.id === req.id), '拒了就离开待办')
   const mem = await hit('/api/memories?side=qingdai')
   const row = mem.body.rows.find((x) => x.id === w.id)
   assert.ok(row, '记忆本身还在')
@@ -369,49 +374,60 @@ function hit(pathname, { method = 'GET', body } = {}) {
   })
 }
 
-await t('GET /api/pending 两类都返回数组', async () => {
+await t('GET /api/pending 返回账本条目数组', async () => {
   const r = await hit('/api/pending?side=qingdai')
   assert.strictEqual(r.code, 200)
-  assert.ok(Array.isArray(r.body.replaced), 'replaced 要是数组')
+  assert.ok(Array.isArray(r.body.decisions), 'decisions 要是数组')
   assert.ok(Array.isArray(r.body.forgotten), 'forgotten 要是数组')
 })
 
-await t('被替代的会出现在待定里，且带替代它的原文', async () => {
+await t('改了口 → 先进待办，同意后才产生「被替代」', async () => {
   const write = tools.find((x) => x.name === 'mem_write')
   const a = await call(write, { text: '面板主色是深海蓝 #4E6E90', importance: 0.6 }, QINGDAI)
   const b = await call(write, { text: '面板主色改成月白，深海蓝只留强调', importance: 0.6, supersedes: [a.id] }, QINGDAI)
-  assert.ok(a.ok && b.ok, `写入失败：${a.reason ?? b.reason ?? ''}`)
+  assert.ok(a.ok, `第一条写入失败：${a.reason ?? ''}`)
+  assert.ok(!b.ok && b.pending, '改了口该进待办：' + JSON.stringify(b).slice(0, 120))
 
   const r = await hit('/api/pending?side=qingdai')
-  const item = r.body.replaced.find((x) => x.id === a.id)
-  assert.ok(item, `待定里没有 #${a.id}：${JSON.stringify(r.body.replaced.map((x) => x.id))}`)
-  assert.strictEqual(item.keeperId, b.id, '要记下是 #' + b.id + ' 替的')
-  assert.ok(item.keeperText.includes('月白'), '要给出替代它的原文')
+  const item = (r.body.decisions ?? []).find((x) => x.kind === 'conflict' && x.payload.againstId === a.id)
+  assert.ok(item, '待办里要有这条改口')
+  assert.ok(String(item.payload.text).includes('月白'), '待办要带新内容')
+
+  // 裁决前旧的还是活跃的
+  let live = await hit('/api/memories?side=qingdai')
+  assert.ok(live.body.rows.some((x) => x.id === a.id), '裁决前旧条仍活跃')
+
+  const ok = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'qingdai', id: item.id, action: 'agree' } })
+  assert.ok(ok.body.ok, `同意的返回：${JSON.stringify(ok.body)}`)
+
+  live = await hit('/api/memories?side=qingdai')
+  assert.ok(!live.body.rows.some((x) => x.id === a.id), '同意后旧条进已被替代')
+  const gone = await hit('/api/pending?side=qingdai')
+  assert.ok(!(gone.body.decisions ?? []).some((x) => x.id === item.id), '同意后该离开待办')
 })
 
-await t('POST /api/unreplace 撤销替代，旧的回来新的下去', async () => {
+await t('同意后旧条进最近删除，还能捡回来', async () => {
+  const write = tools.find((x) => x.name === 'mem_write')
+  const a = await call(write, { text: '撤销测试：旧的那条', importance: 0.6 }, QINGDAI)
+  const c = await call(write, { text: '撤销测试：把旧的顶下去', importance: 0.6, supersedes: [a.id] }, QINGDAI)
+  assert.ok(!c.ok && c.pending, '该进待办：' + JSON.stringify(c).slice(0, 100))
+
   const list = await hit('/api/pending?side=qingdai')
-  const item = list.body.replaced.find((x) => x.keeperText?.includes('月白'))
-  assert.ok(item, '先要有可撤销的一条')
+  const item = (list.body.decisions ?? []).find((x) => x.kind === 'conflict' && x.payload.againstId === a.id)
+  assert.ok(item, '要有可裁决的改口')
+  await hit('/api/decision/resolve', { method: 'POST', body: { side: 'qingdai', id: item.id, action: 'agree' } })
 
-  const r = await hit('/api/unreplace', { method: 'POST', body: { side: 'qingdai', id: item.id } })
-  assert.strictEqual(r.code, 200)
-  assert.ok(r.body.ok, `撤销失败：${r.body.result?.reason ?? ''}`)
+  // 旧的进最近删除（能从那儿捡回来），不是两边都不见
+  const grave = await hit('/api/graveyard?side=qingdai')
+  const back = (grave.body.rows ?? []).find((x) => x.originalId === a.id)
+  assert.ok(back, '旧条该出现在最近删除里')
+  const live1 = await hit('/api/memories?side=qingdai')
+  assert.ok(!live1.body.rows.some((x) => x.id === a.id), '旧条不该还在活跃列表')
 
-  const after = await hit('/api/pending?side=qingdai')
-  assert.ok(!after.body.replaced.some((x) => x.id === item.id), '撤销后不该还在待定里')
-
-  // 旧的回到活跃列表，替它的那条不见了
-  const live = await hit('/api/memories?side=qingdai')
-  assert.ok(live.body.rows.some((x) => x.id === item.id), '旧的该回到记忆里')
-  assert.ok(!live.body.rows.some((x) => x.id === item.keeperId), '替它的那条该下去')
-})
-
-await t('POST /api/unreplace 对没被替代的要拒', async () => {
-  const live = await hit('/api/memories?side=qingdai')
-  const any = live.body.rows[0]
-  const r = await hit('/api/unreplace', { method: 'POST', body: { side: 'qingdai', id: any.id } })
-  assert.strictEqual(r.body.ok, false, '不该让它成功')
+  const r = await hit('/api/restore', { method: 'POST', body: { side: 'qingdai', id: back.id } })
+  assert.ok(r.body.ok, `捡回来失败：${JSON.stringify(r.body.result ?? {})}`)
+  const live2 = await hit('/api/memories?side=qingdai')
+  assert.ok(live2.body.rows.some((x) => x.id === a.id), '捡回来该回到记忆里')
 })
 
 await t('POST /api/forget：搬进台账，能捡回来', async () => {
@@ -441,71 +457,53 @@ await t('POST /api/forget：删不存在的要拒', async () => {
   assert.strictEqual(r.body.ok, false)
 })
 
-console.log('== 待审冲突接口 ==')
-await t('被查重拦下 → 出现在 /api/pending 的 conflicts 里', async () => {
+console.log('== 待办账本接口 ==')
+await t('被查重拦下 → 出现在 /api/pending 的 decisions 里', async () => {
   const write = tools.find((x) => x.name === 'mem_write')
   const a = await call(write, { text: '面板每屏最多显示 20 条记忆，多了要翻页', importance: 0.6 }, WORK)
   assert.ok(a.ok, '第一条该写进去')
   const b = await call(write, { text: '面板每屏最多显示 20 条记忆，多了翻页', importance: 0.6 }, WORK)
-  assert.ok(!b.ok && b.pendingId > 0, '第二条该被拦并留待审')
+  assert.ok(!b.ok && b.decisionId > 0, '第二条该被拦并开条待办：' + JSON.stringify(b).slice(0, 100))
 
   const r = await hit('/api/pending?side=work')
   assert.strictEqual(r.code, 200)
-  assert.ok(Array.isArray(r.body.conflicts), 'conflicts 要是数组')
-  const item = r.body.conflicts.find((x) => x.id === b.pendingId)
-  assert.ok(item, '待审里没有 #' + b.pendingId)
-  assert.strictEqual(item.againstId, a.id)
-  assert.ok(item.againstText.includes('20 条'), '要给出现有那条原文')
-  assert.strictEqual(item.againstGone, false)
+  assert.ok(Array.isArray(r.body.decisions), 'decisions 要是数组')
+  const item = r.body.decisions.find((x) => x.id === b.decisionId)
+  assert.ok(item, '待办里没有 #' + b.decisionId)
+  assert.strictEqual(item.kind, 'conflict')
+  assert.strictEqual(item.payload.againstId, a.id)
+  assert.ok(String(item.payload.againstText).includes('20 条'), '要给出现有那条原文')
 })
 
-await t('POST resolve(replace)：B 替掉 A', async () => {
+await t('POST resolve(agree)：新的替掉旧的', async () => {
   const list = await hit('/api/pending?side=work')
-  const item = list.body.conflicts.find((x) => x.againstText?.includes('20 条'))
-  assert.ok(item, '先要有待审')
+  const item = (list.body.decisions ?? []).find((x) => x.kind === 'conflict' && String(x.payload.againstText ?? '').includes('20 条'))
+  assert.ok(item, '先要有待办')
 
-  const r = await hit('/api/conflicts/resolve', { method: 'POST', body: { side: 'work', id: item.id, action: 'replace' } })
+  const r = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'work', id: item.id, action: 'agree' } })
   assert.strictEqual(r.code, 200)
-  assert.ok(r.body.ok, '处理失败：' + (r.body.result?.reason ?? ''))
+  assert.ok(r.body.ok, '处理失败：' + JSON.stringify(r.body.result ?? {}))
 
   const after = await hit('/api/pending?side=work')
-  assert.ok(!after.body.conflicts.some((x) => x.id === item.id), '处理完不该还在待审里')
-
-  const replaced = await hit('/api/pending?side=work')
-  assert.ok(replaced.body.replaced.some((x) => x.id === item.againstId), '旧的该进「被替代」')
+  assert.ok(!(after.body.decisions ?? []).some((x) => x.id === item.id), '处理完不该还在待办里')
 })
 
-await t('POST resolve(keep)：两条都留', async () => {
-  const write = tools.find((x) => x.name === 'mem_write')
-  await call(write, { text: '工具命名必须准确反映功能，避免误导' }, WORK)
-  const b = await call(write, { text: '工具命名必须准确反映功能' }, WORK)
-  assert.ok(!b.ok && b.pendingId > 0, '该被拦')
-
-  const r = await hit('/api/conflicts/resolve', { method: 'POST', body: { side: 'work', id: b.pendingId, action: 'keep' } })
-  assert.ok(r.body.ok, '处理失败：' + (r.body.result?.reason ?? ''))
-
-  const live = await hit('/api/memories?side=work')
-  const hitText = live.body.rows.filter((x) => x.text.includes('工具命名'))
-  assert.strictEqual(hitText.length, 2, '两条都该活着')
-})
-
-await t('POST resolve(drop)：不写', async () => {
+await t('POST resolve(reject)：不写新的', async () => {
   const write = tools.find((x) => x.name === 'mem_write')
   await call(write, { text: '前缀缓存不能破坏' }, WORK)
   const b = await call(write, { text: '前缀缓存不能破坏掉' }, WORK)
-  assert.ok(!b.ok && b.pendingId > 0, '该被拦')
+  assert.ok(!b.ok && b.decisionId > 0, '该被拦')
 
   const before = (await hit('/api/memories?side=work')).body.rows.length
-  const r = await hit('/api/conflicts/resolve', { method: 'POST', body: { side: 'work', id: b.pendingId, action: 'drop' } })
-  assert.ok(r.body.ok)
+  const r = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'work', id: b.decisionId, action: 'reject' } })
+  assert.ok(r.body.ok, '处理失败：' + JSON.stringify(r.body.result ?? {}))
   const after = (await hit('/api/memories?side=work')).body.rows.length
-  assert.strictEqual(after, before, 'drop 不该写进新记忆')
+  assert.strictEqual(after, before, '拒绝不该写进新记忆')
 })
 
-await t('action 不认识要 400', async () => {
-  const r = await hit('/api/conflicts/resolve', { method: 'POST', body: { side: 'work', id: 1, action: '瞎写' } })
-  assert.strictEqual(r.code, 400)
-  assert.ok(!r.body.ok)
+await t('action 不认识要拒', async () => {
+  const r = await hit('/api/decision/resolve', { method: 'POST', body: { side: 'work', id: 1, action: '瞎写' } })
+  assert.ok(!r.body.ok, '不该让它成功')
 })
 
 console.log(`\n全部 ${passed} 项通过`)

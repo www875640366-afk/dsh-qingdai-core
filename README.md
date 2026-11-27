@@ -63,9 +63,9 @@ $DSH_HOME/storages/qingdai-core/
   core-history.json
 ```
 
-> **命名说明**：磁盘上生活库叫 `life/life.db`（更通用）；但内部 side 值、API 参数
-> `side=qingdai`、面板选项卡仍沿用历史名 `qingdai`。两者由 `routing.js` 的
-> `DB_DIRS` / `DB_NAMES` 一处映射，改路径只需动那里。
+> **命名说明**：磁盘目录和 side 值统一叫 `life`：库文件 `life/life.db`，API 参数
+> `side=life`，面板选项卡也叫「生活」。存储根目录仍叫 `qingdai-core`（跟着插件名走）。
+> 路径映射在 `routing.js` 的 `DB_DIRS` / `DB_NAMES` 一处，改路径只需动那里。
 
 路由规则只有一条：**会话在 `wakeSessions` 白名单里 → 生活库，否则 → 工作库**。
 白名单同时是主动开口的白名单，一份名单两处用，避免两份清单漂移。
@@ -127,10 +127,12 @@ $DSH_HOME/storages/qingdai-core/
 模型只能调 `mem_write({ requestPin: true, pinReason })` **请求**，进待办由人裁决。
 人同意才冻结；不同意就按正常曲线走。模型不能自己钉——「这条很重要」不该由写它的那一方说了算。
 
-### 替代不是删除
+### 替代不是删除，是换人裁决
 
-`supersedes: [旧 id]` 把旧条标 `superseded=1`：检索和淘汰都不再看它，但它还在库里。
-`supersededBy` 记下「被谁替了」，面板能一键换回来（旧的回来，替它的那条下去）——双向可逆。
+`supersedes: [旧 id]` **不立即生效**：这条新内容进「处理」页，由人裁决。
+
+同意 = 新条入库、旧条进 `graveyard`（软删，14 天内可捡回）；拒绝 = 什么都不写。
+查重撞车、疑似密钥、请求钉住走同一条路：都是「处理」页里的一张小卡片，一个同意键一个拒绝键。
 
 ---
 
@@ -285,7 +287,7 @@ embedding 要一次网络请求，放在组装路径上会拖慢每一轮。结�
 
 | 工具 | 干什么 | 关键参数 |
 |---|---|---|
-| **`mem_write`** | 写一条记忆节点 | `text`（必填）、`importance`（0.9/0.6/0.3，只影响掉多快）、`supersedes`（作废旧条）、`from`（user/self/env）、`requestPin` + `pinReason`（请求钉住）、`force`（强写） |
+| **`mem_write`** | 写一条记忆节点 | `text`（必填）、`importance`（0.9/0.6/0.3，只影响掉多快）、`supersedes`（作废旧条）、`from`（user/self/env）、`requestPin` + `pinReason`（请求钉住）、`suggest` + `suggestReason`（随待办一起给出处理建议）、`force`（强写） |
 | **`mem_search`** | 查记忆节点 | `query`（必填，自然说法）、`limit`（默认 6） |
 | **`raw_memory`** | 查原文留底 | `fromSeq` / `toSeq` / `keyword` / `limit`（默认 20） |
 
@@ -485,7 +487,6 @@ $DSH_HOME/storages/qingdai-core/
   core-history.json     改动历史（最近 10 条）
   core-sections.json    每节最后修改时间
   core-backup/          每次改之前的备份
-  extract.log           提炼台账（JSONL，只在手动提炼时写）
   core.log              插件日志（超 1MB 滚成 .old，只留一份）
 
 每库的表：
@@ -494,7 +495,7 @@ $DSH_HOME/storages/qingdai-core/
   vectors       id → float32 BLOB
   events        原文留底（永不自动删）
   graveyard     最近删除（软删，可恢复）
-  conflicts     查重拦下的待审
+  decisions     待办账本（冲突 / 钉住审批 / 待写审批，建议是条目字段）
   recall_sent   注入去重（一会话一行）
 ```
 
@@ -538,6 +539,16 @@ ctx.agents.resume({ resumeSessionId: sid, setup: presetSetup(ctx, log) })
 
 **6. `orders` 的边界**：`order 11000` 才压得住 DSH 官方最大 `10200`，人格核心要落在最后。
 
+**7. 改 SQLite 表结构后，触发器不会跟着代码消失**
+
+`db.js` 里删掉 `CREATE TRIGGER` 只影响**新库**。已存在的库里那个触发器还在，每次写入照常跑。
+改表结构要对着每个库手动 `DROP TRIGGER IF EXISTS`，否则旧逻辑一直生效。
+
+**8. 查可能不存在的表，包一层 try**
+
+`db.prepare(sql).get()` 碰到表不存在会抛。直接抛会让整个接口 500；包 try 返回 0 更稳，
+但要记得同步改 SQL 指向新表，否则字段永远是 0 —— 静默比报错更难查。
+
 ---
 
 ## 十五、目录
@@ -553,7 +564,6 @@ src/
   inject.js        记忆注入（预取 + TTL + 三道闸门）
   turn.js          每轮留底（events 表）
   vector.js        嵌入 + 精排（默认 SiliconFlow）
-  extract.js       批量提炼（保留但无调用点，手动补用）
   secrets.js       密钥嗅探
   tools.js         记忆三个工具的定义
   raw.js           原文的查询与管理
@@ -573,7 +583,7 @@ src/
     api.js         HTTP 接口（面板用）
     origin.js      存在天数
     meme.js        表情清单
-lib/client.js      面板（记忆 / 待定 / 核心 / 设置）
+lib/client.js      面板（拾光：处理 / 记忆查看 / 最近删除 / 原文 / 人格核心 / 设置）
 ```
 
 ---
@@ -584,7 +594,7 @@ lib/client.js      面板（记忆 / 待定 / 核心 / 设置）
 - **拿不到会话 id → 拒写**，不猜库
 - **留底永不自动删**，淘汰只进 `graveyard`（软删，可恢复）
 - **`sources` 只由插件填**，不接受任何外部传入的出处
-- **`superseded=1` 是「被新的替代」，不是删**
+- **替代不自动生效**：新内容先进「处理」页，人点头才换人；旧条进 `graveyard` 而不是消失
 - **不自动提炼**，把「记不记」交还给模型
 - **不加「上次开口刚过 N 分钟」这道闸门**：频率已经由 `wakeCheckMinutes` 和 `wakePerDay` 框住，
   再加一道只会出现「该开口了但闸门说要等」这种没意义的状态。要降频就改那两个数
