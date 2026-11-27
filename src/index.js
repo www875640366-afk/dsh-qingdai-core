@@ -641,10 +641,15 @@ export function createApp(ctx, config = {}) {
           const DAY = 86_400_000
           const grace = CURVE.graveyardDays ?? 14
           return db.prepare(
-            'SELECT id, originalId, text, importance, heat, reason, at FROM graveyard ORDER BY at DESC LIMIT ?',
+            'SELECT id, originalId, text, importance, heat, reason, at, snapshot FROM graveyard ORDER BY at DESC LIMIT ?',
           ).all(Math.max(1, Math.min(500, Number(limit) || 100))).map((r) => {
             const at = Number(r.at) || 0
             const expiresAt = at + grace * DAY
+            // 档位从快照算：这条被删之前是什么档位，就显示什么。快照里有
+            // 完整的 pinned / 时间戳，用删除那一刻算，跟活跃列表口径一致。
+            let snap = null
+            try { snap = safeJson(r.snapshot) } catch { snap = null }
+            const tier = snap ? tierOf(snap, at, CURVE) : null
             return {
               id: Number(r.id),
               originalId: r.originalId == null ? null : Number(r.originalId),
@@ -654,6 +659,8 @@ export function createApp(ctx, config = {}) {
               at,
               expiresAt,
               daysLeft: Math.max(0, Math.ceil((expiresAt - now) / DAY)),
+              tier,
+              tierLabel: tier ? (TIERS[tier] ?? '') : '',
             }
           })
         },
